@@ -6,10 +6,11 @@
  * covers every path BELOW /api, and it is the reason those routes reach Express
  * in production exactly as they do on localhost.
  *
- * Like api/index.ts it defines NO routes; it re-exports the single app from
- * `server.ts`. Express performs all of its own routing off the original request
- * URL, so no path rewriting is involved and no route is duplicated.
+ * Like api/index.ts it defines NO routes; it hands Vercel the same handler, which
+ * delegates to the single app in `server.ts`. Express performs all of its own
+ * routing off the original request URL, so no path rewriting is involved and no
+ * route is duplicated.
  */
-import app from '../server';
+import { createVercelHandler } from '../vercelAdapter';
 
-export default app;
+export default createVercelHandler();
