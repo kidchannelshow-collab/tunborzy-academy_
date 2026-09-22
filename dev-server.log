@@ -1,0 +1,23 @@
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+◇ injected env (9) from .env.local,.env // tip: ◈ secrets for agents [www.dotenvx.com]
+Supabase key source: publishable
+PDF import model: gemini-2.5-flash
+VITE_SUPABASE_URL: present=yes length=40
+VITE_SUPABASE_PUBLISHABLE_KEY: present=yes length=46
+VITE_SUPABASE_ANON_KEY: present=no length=0
+GEMINI_API_KEY: present=yes length=53
+WebSocket server error: Port 24678 is already in use
+Uncaught Exception on server: Error: listen EADDRINUSE: address already in use 0.0.0.0:3000
+    at Server.setupListenHandle [as _listen2] (node:net:1941:16)
+    at listenInCluster (node:net:1998:12)
+    at node:net:2207:7
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+  code: 'EADDRINUSE',
+  errno: -4091,
+  syscall: 'listen',
+  address: '0.0.0.0',
+  port: 3000
+}
