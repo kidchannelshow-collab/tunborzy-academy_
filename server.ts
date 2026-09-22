@@ -14,8 +14,10 @@ import { createClient } from '@supabase/supabase-js';
 import multer from 'multer';
 import { createRequire } from 'module';
 const require = createRequire(typeof __filename !== 'undefined' ? __filename : (typeof import.meta !== 'undefined' && import.meta.url ? import.meta.url : process.cwd()));
-// @ts-ignore
-const { PDFParse } = require('pdf-parse');
+// NOTE: `pdf-parse` is deliberately NOT required here — see the lazy require at
+// its single point of use in POST /api/cbt/parse-pdf. Requiring it at module
+// scope made the whole backend depend on a native binary loading, which is not
+// something a serverless runtime guarantees.
 import { extractQuestionsFromText } from './server/pdfQuestionExtractor';
 import {
   generateExplanations,
@@ -393,6 +395,15 @@ ${(content || '').substring(0, 10000)}`;
         if (req.file?.buffer) {
           let parser: any = null;
           try {
+            // Required lazily on purpose. `pdf-parse` pulls in @napi-rs/canvas (a
+            // NATIVE addon built per platform) and pdfjs-dist. When that require
+            // sat at module scope, a runtime where the native binary could not be
+            // loaded took down the ENTIRE backend — every route returned an
+            // opaque FUNCTION_INVOCATION_FAILED, /api/health included, because the
+            // module never finished loading. Deferring it to first use confines
+            // any such failure to PDF parsing, which already reports its own error.
+            // @ts-ignore
+            const { PDFParse } = require('pdf-parse');
             parser = new PDFParse({ data: req.file.buffer });
             const parsedPdf = await parser.getText();
             pdfText = parsedPdf?.text || '';

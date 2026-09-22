@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\ednut\\\\Downloads\\\\tunborzy-academy-2 \\(7\\)\\\\src\" -Recurse -File | Where-Object { $_.Extension -match '\\\\.\\(ts|tsx\\)$' } | Select-Object -ExpandProperty FullName)"
+    ]
+  }
+}
