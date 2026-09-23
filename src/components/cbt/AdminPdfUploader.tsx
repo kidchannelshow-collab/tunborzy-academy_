@@ -50,6 +50,19 @@ interface AdminPdfUploaderProps {
   destType?: 'UTME' | 'Post-UTME' | 'Undergraduate';
 }
 
+/**
+ * Largest file the importer will accept.
+ *
+ * Vercel caps a serverless request body at roughly 4.5 MB and rejects anything
+ * larger at the platform layer, before any handler runs. The UI previously
+ * imposed no limit at all and actively invited "large past question papers", so
+ * an oversized upload failed with no usable explanation.
+ *
+ * Checking here converts that into a clear, actionable message. Raise it only
+ * alongside a deployment change that lifts the platform limit.
+ */
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+
 export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploaderProps) {
   // Widened to `string` so the dormant 'Undergraduate' comparisons below still
   // type-check against the prop's narrower union — see the prop's doc comment.
@@ -226,6 +239,13 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
     if (selected) {
       if (selected.type !== 'application/pdf' && !selected.name.endsWith('.pdf') && !selected.name.endsWith('.txt')) {
         setErrorMsg('Please select a valid PDF or text file.');
+        return;
+      }
+      if (selected.size > MAX_UPLOAD_BYTES) {
+        setErrorMsg(
+          `This file is ${(selected.size / (1024 * 1024)).toFixed(1)} MB. The upload limit is ` +
+            `${MAX_UPLOAD_BYTES / (1024 * 1024)} MB per import — please split the document and import it in parts.`
+        );
         return;
       }
       setFile(selected);
@@ -565,7 +585,21 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
         }),
       });
 
-      const result: any = await res.json().catch(() => ({}));
+      // Content-type is checked before parsing, for the same reason the import
+      // call checks it. `res.json().catch(() => ({}))` silently swallowed an HTML
+      // or plain-text error page into an empty object, so a backend that never
+      // answered was reported to the admin as "0 explanations generated" rather
+      // than as a failure.
+      const contentType = res.headers.get('content-type');
+      let result: any = {};
+      if (contentType && contentType.includes('application/json')) {
+        result = await res.json();
+      } else if (!res.ok) {
+        const textResp = await res.text();
+        throw new Error(
+          `Explanation request returned a non-JSON response (${res.status}): ${textResp.substring(0, 100)}`
+        );
+      }
       if (!res.ok) {
         throw new Error(result.error || `Explanation request failed with status ${res.status}`);
       }

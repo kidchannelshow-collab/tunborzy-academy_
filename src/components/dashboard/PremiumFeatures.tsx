@@ -3,6 +3,7 @@ import { Lock, Crown, RefreshCcw, PenTool, CheckCircle2, Loader2, BookOpen } fro
 import { useState, useEffect } from 'react';
 import { useProfile } from '../../lib/useProfile';
 import { supabase } from '../../supabaseClient';
+import { readApiJsonOrThrow } from '../../lib/apiResponse';
 
 interface PremiumFeaturesProps { onNavigate?: (view: string) => void; }
 
@@ -48,9 +49,10 @@ export default function PremiumFeatures({ onNavigate }: PremiumFeaturesProps) {
         })
       });
 
-      const text = await res.text();
-      let data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Payment verification failed');
+      // `JSON.parse(await res.text())` threw a syntax error on the platform's
+      // HTML error page, so a failed backend surfaced as "Unexpected token '<'"
+      // instead of the real status.
+      await readApiJsonOrThrow<any>(res, 'Payment verification failed');
 
       setSuccessMsg('Premium successfully activated!');
       window.history.replaceState({}, document.title, window.location.pathname);
@@ -154,9 +156,10 @@ export default function PremiumFeatures({ onNavigate }: PremiumFeaturesProps) {
         })
       });
 
-      const text = await res.text();
-      let data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Payment verification failed');
+      // `JSON.parse(await res.text())` threw a syntax error on the platform's
+      // HTML error page, so a failed backend surfaced as "Unexpected token '<'"
+      // instead of the real status.
+      await readApiJsonOrThrow<any>(res, 'Payment verification failed');
 
       setSuccessMsg('Premium successfully activated!');
       setTimeout(() => {

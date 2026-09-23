@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { Settings, Globe, BookOpen, Clock, Award, Users, Bell, Save, CheckCircle2, AlertCircle, RefreshCw, ShieldAlert, ToggleLeft, ToggleRight, Cpu, HardDrive, Key, Activity, ShieldCheck, AlertTriangle, Calendar, GraduationCap, Wrench } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { refreshPlatformSettings } from '../../lib/platformSettings';
+import { readApiJsonOrThrow } from '../../lib/apiResponse';
 
 /**
  * System Settings — the admin surface for platform-wide configuration.
@@ -142,8 +143,10 @@ export default function SystemSettings() {
           'Authorization': `Bearer ${session.access_token}`
         }
       });
-      if (!res.ok) throw new Error('Failed to fetch platform settings');
-      const data = await res.json();
+      // Reading through the helper means a backend that answers with an HTML or
+      // plain-text error page reports the actual status and the server's own
+      // message, rather than surfacing as a JSON parse error.
+      const data = await readApiJsonOrThrow<any>(res, 'Failed to fetch platform settings');
 
       if (data.settings && Array.isArray(data.settings)) {
         data.settings.forEach((row: any) => {
@@ -279,8 +282,7 @@ export default function SystemSettings() {
         body: JSON.stringify({ category, settings: payloadSettings })
       });
 
-      const result = await res.json();
-      if (!res.ok) throw new Error(result.error || 'Failed to save settings');
+      await readApiJsonOrThrow<any>(res, 'Failed to save settings');
 
       // The shared store backs the maintenance gate, the branding and every exam
       // entry point, so it is refreshed from the database rather than patched —

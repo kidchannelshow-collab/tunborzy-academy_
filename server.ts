@@ -393,29 +393,42 @@ ${(content || '').substring(0, 10000)}`;
         const courseId = req.body?.courseId;
 
         if (req.file?.buffer) {
-          let parser: any = null;
-          try {
-            // Required lazily on purpose. `pdf-parse` pulls in @napi-rs/canvas (a
-            // NATIVE addon built per platform) and pdfjs-dist. When that require
-            // sat at module scope, a runtime where the native binary could not be
-            // loaded took down the ENTIRE backend — every route returned an
-            // opaque FUNCTION_INVOCATION_FAILED, /api/health included, because the
-            // module never finished loading. Deferring it to first use confines
-            // any such failure to PDF parsing, which already reports its own error.
-            // @ts-ignore
-            const { PDFParse } = require('pdf-parse');
-            parser = new PDFParse({ data: req.file.buffer });
-            const parsedPdf = await parser.getText();
-            pdfText = parsedPdf?.text || '';
-          } catch (pdfErr: any) {
-            console.error('PDF parsing error:', pdfErr);
-            return res.status(400).json({ error: `Failed to parse PDF file: ${pdfErr?.message || 'Invalid PDF format'}` });
-          } finally {
-            if (parser && typeof parser.destroy === 'function') {
-              try {
-                await parser.destroy();
-              } catch (destroyErr) {
-                console.error('Error destroying PDF parser:', destroyErr);
+          // A plain-text upload is decoded directly.
+          //
+          // The picker accepts both .pdf and .txt, but every upload used to be
+          // handed to pdf-parse regardless of its type — so a .txt file always
+          // came back as "Failed to parse PDF file" even though the UI offered
+          // it. Decoding text here is what makes the advertised format work.
+          const isPlainText =
+            req.file.mimetype === 'text/plain' || /\.txt$/i.test(req.file.originalname || '');
+
+          if (isPlainText) {
+            pdfText = req.file.buffer.toString('utf8');
+          } else {
+            let parser: any = null;
+            try {
+              // Required lazily on purpose. `pdf-parse` pulls in @napi-rs/canvas (a
+              // NATIVE addon built per platform) and pdfjs-dist. When that require
+              // sat at module scope, a runtime where the native binary could not be
+              // loaded took down the ENTIRE backend — every route returned an
+              // opaque FUNCTION_INVOCATION_FAILED, /api/health included, because the
+              // module never finished loading. Deferring it to first use confines
+              // any such failure to PDF parsing, which already reports its own error.
+              // @ts-ignore
+              const { PDFParse } = require('pdf-parse');
+              parser = new PDFParse({ data: req.file.buffer });
+              const parsedPdf = await parser.getText();
+              pdfText = parsedPdf?.text || '';
+            } catch (pdfErr: any) {
+              console.error('PDF parsing error:', pdfErr);
+              return res.status(400).json({ error: `Failed to parse PDF file: ${pdfErr?.message || 'Invalid PDF format'}` });
+            } finally {
+              if (parser && typeof parser.destroy === 'function') {
+                try {
+                  await parser.destroy();
+                } catch (destroyErr) {
+                  console.error('Error destroying PDF parser:', destroyErr);
+                }
               }
             }
           }
@@ -1895,7 +1908,17 @@ Instructions:
       }
 
       // Check if user is Admin
-      const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle();
+      // The role lookup MUST run with the CALLER's JWT.
+      //
+      // `supabase` is the shared anon client — publishable key, no user session —
+      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
+      // to every admin. Settings, system health and audit logs were therefore
+      // unusable for exactly the people meant to use them.
+      //
+      // RLS is unchanged and no policy was relaxed: the query simply runs as the
+      // authenticated caller, who is permitted to read their own profile row.
+      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
+      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
       if (!profile || profile.role !== 'Admin') {
         return res.status(403).json({ error: 'Forbidden: Admin access required' });
       }
@@ -1925,7 +1948,17 @@ Instructions:
       }
 
       // Check if user is Admin
-      const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle();
+      // The role lookup MUST run with the CALLER's JWT.
+      //
+      // `supabase` is the shared anon client — publishable key, no user session —
+      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
+      // to every admin. Settings, system health and audit logs were therefore
+      // unusable for exactly the people meant to use them.
+      //
+      // RLS is unchanged and no policy was relaxed: the query simply runs as the
+      // authenticated caller, who is permitted to read their own profile row.
+      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
+      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
       if (!profile || profile.role !== 'Admin') {
         return res.status(403).json({ error: 'Forbidden: Admin access required' });
       }
@@ -2027,7 +2060,17 @@ Instructions:
         return res.status(401).json({ error: 'Unauthorized: Invalid token' });
       }
 
-      const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle();
+      // The role lookup MUST run with the CALLER's JWT.
+      //
+      // `supabase` is the shared anon client — publishable key, no user session —
+      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
+      // to every admin. Settings, system health and audit logs were therefore
+      // unusable for exactly the people meant to use them.
+      //
+      // RLS is unchanged and no policy was relaxed: the query simply runs as the
+      // authenticated caller, who is permitted to read their own profile row.
+      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
+      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
       if (!profile || profile.role !== 'Admin') {
         return res.status(403).json({ error: 'Forbidden: Admin access required' });
       }
@@ -2066,7 +2109,17 @@ Instructions:
         return res.status(401).json({ error: 'Unauthorized: Invalid token' });
       }
 
-      const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle();
+      // The role lookup MUST run with the CALLER's JWT.
+      //
+      // `supabase` is the shared anon client — publishable key, no user session —
+      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
+      // to every admin. Settings, system health and audit logs were therefore
+      // unusable for exactly the people meant to use them.
+      //
+      // RLS is unchanged and no policy was relaxed: the query simply runs as the
+      // authenticated caller, who is permitted to read their own profile row.
+      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
+      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
       if (!profile || profile.role !== 'Admin') {
         return res.status(403).json({ error: 'Forbidden: Admin access required' });
       }
@@ -2136,7 +2189,17 @@ Instructions:
         return res.status(401).json({ error: 'Unauthorized: Invalid token' });
       }
 
-      const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle();
+      // The role lookup MUST run with the CALLER's JWT.
+      //
+      // `supabase` is the shared anon client — publishable key, no user session —
+      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
+      // to every admin. Settings, system health and audit logs were therefore
+      // unusable for exactly the people meant to use them.
+      //
+      // RLS is unchanged and no policy was relaxed: the query simply runs as the
+      // authenticated caller, who is permitted to read their own profile row.
+      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
+      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
       if (!profile || profile.role !== 'Admin') {
         return res.status(403).json({ error: 'Forbidden: Admin access required' });
       }

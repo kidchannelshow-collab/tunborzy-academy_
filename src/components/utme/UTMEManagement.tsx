@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Plus, Edit2, Trash2, CheckCircle2, ShieldAlert, BookOpen, Layers, FileText, Copy, Check, Eye, Sparkles, Archive, ArchiveRestore, ArrowUp, ArrowDown, Search } from 'lucide-react';
+import { Plus, Edit2, Trash2, CheckCircle2, ShieldAlert, BookOpen, Layers, FileText, Copy, Check, Eye, EyeOff, Sparkles, Archive, ArchiveRestore, ArrowUp, ArrowDown, Search, ClipboardList, Loader2, AlertCircle, X } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useProfile } from '../../lib/useProfile';
 import AdminPdfUploader from '../cbt/AdminPdfUploader';
@@ -39,12 +39,16 @@ function categoryPill(state: 'published' | 'unpublished' | 'partial' | 'empty') 
 
 export default function UTMEManagement() {
   const { profile } = useProfile();
+  // Same derivation the Post-UTME and Undergraduate managers use, so the portal
+  // badge reads identically across the three.
+  const isLecturer = profile?.role === 'Lecturer';
   const [activeTab, setActiveTab] = useState<'subjects' | 'topics' | 'questions' | 'ai_generator'>('subjects');
-  
+
   const [subjects, setSubjects] = useState<any[]>([]);
   const [topics, setTopics] = useState<any[]>([]);
   const [questions, setQuestions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState('');
 
   // Question Form Modal
   const [showQuestionModal, setShowQuestionModal] = useState(false);
@@ -153,7 +157,7 @@ export default function UTMEManagement() {
       resetQuestionForm();
       fetchData();
     } catch (err: any) {
-      alert('Error saving question: ' + err.message);
+      setErrorMsg('Error saving question: ' + err.message);
     }
   };
 
@@ -173,7 +177,7 @@ export default function UTMEManagement() {
       }]);
       fetchData();
     } catch (err: any) {
-      alert('Error duplicating: ' + err.message);
+      setErrorMsg('Error duplicating: ' + err.message);
     }
   };
 
@@ -206,7 +210,7 @@ export default function UTMEManagement() {
       setTopicName('');
       fetchData();
     } catch (err: any) {
-      alert('Error saving topic: ' + err.message);
+      setErrorMsg('Error saving topic: ' + err.message);
     }
   };
 
@@ -215,7 +219,7 @@ export default function UTMEManagement() {
   const setTopicActive = async (topic: any, isActive: boolean) => {
     const { error } = await supabase.from('utme_topics').update({ is_active: isActive }).eq('id', topic.id);
     if (error) {
-      alert(`Error: ${error.message}`);
+      setErrorMsg(`Error: ${error.message}`);
       return;
     }
     fetchData();
@@ -226,13 +230,13 @@ export default function UTMEManagement() {
     // silently strip the topic off every question filed under it.
     const attached = questions.filter((q) => q.topic_id === topic.id).length;
     if (attached > 0) {
-      alert(`"${topic.name}" still has ${attached} question(s). Archive it instead, or re-file those questions first.`);
+      setErrorMsg(`"${topic.name}" still has ${attached} question(s). Archive it instead, or re-file those questions first.`);
       return;
     }
     if (!window.confirm(`Delete the topic "${topic.name}"? This cannot be undone.`)) return;
     const { error } = await supabase.from('utme_topics').delete().eq('id', topic.id);
     if (error) {
-      alert(`Error: ${error.message}`);
+      setErrorMsg(`Error: ${error.message}`);
       return;
     }
     fetchData();
@@ -251,7 +255,7 @@ export default function UTMEManagement() {
     ]);
     const failed = results.find((r: any) => r.error);
     if (failed) {
-      alert(`Error: ${failed.error.message}`);
+      setErrorMsg(`Error: ${failed.error.message}`);
       return;
     }
     fetchData();
@@ -406,7 +410,7 @@ export default function UTMEManagement() {
 
     const { error } = await supabase.from('utme_questions').delete().in('id', ids);
     if (error) {
-      alert(`Error: ${error.message}`);
+      setErrorMsg(`Error: ${error.message}`);
       return;
     }
     setSelectedQuestionIds(new Set());
@@ -444,7 +448,7 @@ export default function UTMEManagement() {
       if (error) throw error;
       await fetchData();
     } catch (err: any) {
-      alert(`Error: ${err?.message || 'unknown error'}`);
+      setErrorMsg(`Error: ${err?.message || 'unknown error'}`);
     } finally {
       setBusy(false);
     }
@@ -454,25 +458,44 @@ export default function UTMEManagement() {
     <div className="max-w-7xl mx-auto py-8 px-4 space-y-8">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#0f172a] border border-slate-800 p-8 rounded-3xl">
         <div>
-          <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full">
-            Admin & Lecturer Portal
+          <span className="text-xs font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 px-3 py-1 rounded-full">
+            {isLecturer ? 'Lecturer Portal' : 'Admin Portal'}
           </span>
-          <h1 className="text-3xl font-display font-bold text-white mt-2">UTME Question Bank Management</h1>
+          <h1 className="text-3xl font-display font-bold text-white mt-2 flex items-center gap-3">
+            <ClipboardList className="text-blue-400" size={28} /> UTME Question Bank Management
+          </h1>
           <p className="text-slate-400 mt-1">Manage subjects, topics, question workflows, and publication status.</p>
         </div>
 
         <div className="flex items-center gap-3">
           <button
             onClick={() => { resetQuestionForm(); setShowQuestionModal(true); }}
-            className="px-5 py-3 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold rounded-2xl flex items-center gap-2 transition-colors"
+            className="px-5 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-2xl flex items-center gap-2 transition-colors"
           >
             <Plus size={20} /> Add UTME Question
           </button>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-2 border-b border-slate-800 pb-4">
+      {/* Error banner — the Post-UTME and Undergraduate managers surface failures
+          here rather than interrupting with a browser alert. */}
+      {errorMsg && (
+        <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-2xl text-rose-300 text-sm flex items-start gap-2">
+          <AlertCircle size={18} className="shrink-0 mt-0.5" />
+          <span className="flex-1">{errorMsg}</span>
+          <button
+            onClick={() => setErrorMsg('')}
+            className="text-rose-300 hover:text-white transition-colors"
+            aria-label="Dismiss error"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {/* Tabs. `flex-wrap` matches the other two managers so the row wraps
+          instead of overflowing on narrow screens. */}
+      <div className="flex flex-wrap gap-2 border-b border-slate-800 pb-4">
         {[
           { id: 'subjects', label: 'UTME Subjects', icon: BookOpen },
           { id: 'topics', label: 'Topics', icon: Layers },
@@ -484,7 +507,7 @@ export default function UTMEManagement() {
             onClick={() => setActiveTab(tab.id as any)}
             className={`flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-sm transition-all ${
               activeTab === tab.id
-                ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20'
+                ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/20'
                 : 'bg-[#0f172a] text-slate-400 hover:text-white border border-slate-800'
             }`}
           >
@@ -493,9 +516,36 @@ export default function UTMEManagement() {
         ))}
       </div>
 
+      {/* Loading state. `loading` was already tracked but never rendered, so the
+          bank appeared empty for the moment before the fetch resolved — the same
+          silent gap the other two managers cover with a spinner. The ternary
+          gates the tab content, matching Post-UTME and Undergraduate, so the
+          empty states cannot flash behind the spinner. */}
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 size={28} className="animate-spin text-blue-400" />
+            <p className="text-sm text-slate-400">Loading UTME content…</p>
+          </div>
+        </div>
+      ) : (
+        <>
       {activeTab === 'ai_generator' && (
-        <div className="py-4">
-          <AdminPdfUploader />
+        <div className="py-4 space-y-4">
+          <div className="bg-blue-500/5 border border-blue-500/20 rounded-2xl p-4">
+            <h3 className="text-sm font-bold text-blue-300 flex items-center gap-2">
+              <Sparkles size={16} /> Import UTME questions from a document
+            </h3>
+            <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+              Upload a past question paper as PDF or plain text. Questions are detected from the
+              document's own layout and answer key, then reviewed here before anything is saved to
+              the UTME question bank.
+            </p>
+          </div>
+          {/* `destType` is passed explicitly for the same reason the other two
+              managers pass it: the default happens to be 'UTME', but relying on
+              the default makes the destination invisible at the call site. */}
+          <AdminPdfUploader destType="UTME" />
         </div>
       )}
 
@@ -883,6 +933,9 @@ export default function UTMEManagement() {
       )}
 
       {/* Question Modal */}
+        </>
+      )}
+
       {showQuestionModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
           <motion.div initial={{ scale: 0.95 }} animate={{ scale: 1 }} className="bg-[#0f172a] border border-slate-800 rounded-3xl p-8 max-w-2xl w-full space-y-6 my-8">
@@ -977,7 +1030,7 @@ export default function UTMEManagement() {
 
               <div className="flex gap-4 pt-4">
                 <button type="button" onClick={() => setShowQuestionModal(false)} className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl">Cancel</button>
-                <button type="submit" className="flex-1 py-3 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold rounded-xl">Save Question</button>
+                <button type="submit" className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl">Save Question</button>
               </div>
             </form>
           </motion.div>
@@ -1003,7 +1056,7 @@ export default function UTMEManagement() {
               </div>
               <div className="flex gap-4 pt-2">
                 <button type="button" onClick={() => { setShowTopicModal(false); setEditingTopicId(null); }} className="flex-1 py-3 bg-slate-800 text-white font-bold rounded-xl">Cancel</button>
-                <button type="submit" className="flex-1 py-3 bg-emerald-500 text-slate-950 font-bold rounded-xl">{editingTopicId ? 'Update Topic' : 'Save Topic'}</button>
+                <button type="submit" className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl">{editingTopicId ? 'Update Topic' : 'Save Topic'}</button>
               </div>
             </form>
           </motion.div>
