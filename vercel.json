@@ -4,7 +4,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/*.ts": {
-      "includeFiles": "node_modules/@napi-rs/**"
+      "includeFiles": "node_modules/{@napi-rs,pdf-parse}/**"
     }
   },
   "rewrites": [
