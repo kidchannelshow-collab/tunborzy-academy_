@@ -414,9 +414,21 @@ ${(content || '').substring(0, 10000)}`;
               // opaque FUNCTION_INVOCATION_FAILED, /api/health included, because the
               // module never finished loading. Deferring it to first use confines
               // any such failure to PDF parsing, which already reports its own error.
+              // The worker chunk is required FIRST, before the main package, and
+              // its CanvasFactory is handed to PDFParse explicitly. This is what
+              // makes the graphics globals pdf.js needs (`DOMMatrix`, `ImageData`,
+              // `Path2D`) real in a server runtime: this chunk requires
+              // `@napi-rs/canvas` statically and installs them on `globalThis`,
+              // whereas the main entry reaches that same addon through a
+              // createRequire held in a local variable — a call Vercel's file
+              // tracing cannot follow, so the addon is absent from the deployed
+              // function and the polyfill degrades to a warning. pdf.js then
+              // throws "DOMMatrix is not defined" while parsing.
+              // @ts-ignore
+              const { CanvasFactory } = require('pdf-parse/worker');
               // @ts-ignore
               const { PDFParse } = require('pdf-parse');
-              parser = new PDFParse({ data: req.file.buffer });
+              parser = new PDFParse({ data: req.file.buffer, CanvasFactory });
               const parsedPdf = await parser.getText();
               pdfText = parsedPdf?.text || '';
             } catch (pdfErr: any) {
