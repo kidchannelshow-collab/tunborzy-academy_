@@ -424,8 +424,17 @@ ${(content || '').substring(0, 10000)}`;
               // tracing cannot follow, so the addon is absent from the deployed
               // function and the polyfill degrades to a warning. pdf.js then
               // throws "DOMMatrix is not defined" while parsing.
+              // Required by explicit path rather than the `pdf-parse/worker`
+              // subpath: that export map is dual-format (import -> esm,
+              // require -> cjs) and file tracing does not follow the require
+              // target, so the chunk never reached the deployed function and
+              // the require failed with MODULE_NOT_FOUND. A literal path is a
+              // concrete file the tracer can copy, and from it the trace
+              // reaches this chunk's static require of `@napi-rs/canvas` and
+              // that package's literal platform requires, so no bundle
+              // includeFiles rule is needed for this file.
               // @ts-ignore
-              const { CanvasFactory } = require('pdf-parse/worker');
+              const { CanvasFactory } = require('./node_modules/pdf-parse/dist/worker/cjs/index.cjs');
               // @ts-ignore
               const { PDFParse } = require('pdf-parse');
               parser = new PDFParse({ data: req.file.buffer, CanvasFactory });
