@@ -18,12 +18,12 @@ const require = createRequire(typeof __filename !== 'undefined' ? __filename : (
 // its single point of use in POST /api/cbt/parse-pdf. Requiring it at module
 // scope made the whole backend depend on a native binary loading, which is not
 // something a serverless runtime guarantees.
-import { extractQuestionsFromText } from './server/pdfQuestionExtractor';
+import { extractQuestionsFromText } from './server/pdfQuestionExtractor.js';
 import {
   generateExplanations,
   resolveExplanationEngine,
   DEFAULT_EXPLANATION_BATCH_SIZE,
-} from './server/explanationGenerator';
+} from './server/explanationGenerator.js';
 
 // Load Supabase configuration with safe fallbacks
 const supabaseUrl = process.env.VITE_SUPABASE_URL || 'https://placeholder.supabase.co';

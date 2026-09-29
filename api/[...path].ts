@@ -11,6 +11,6 @@
  * routing off the original request URL, so no path rewriting is involved and no
  * route is duplicated.
  */
-import { createVercelHandler } from '../vercelAdapter';
+import { createVercelHandler } from '../vercelAdapter.js';
 
 export default createVercelHandler();

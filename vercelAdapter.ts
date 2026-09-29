@@ -38,7 +38,7 @@ let loading: Promise<void> | null = null;
 
 function loadBackend(): Promise<void> {
   if (!loading) {
-    loading = import('./server')
+    loading = import('./server.js')
       .then((mod: any) => {
         // `server.ts` has both a default and a named `app` export; accept either
         // so a future change to the export shape cannot silently break this.

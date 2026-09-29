@@ -23,6 +23,6 @@
  * parse mode for this directory only. It cannot affect the Vite build, Tailwind,
  * or server.ts, none of which live here.
  */
-import { createVercelHandler } from '../vercelAdapter';
+import { createVercelHandler } from '../vercelAdapter.js';
 
 export default createVercelHandler();
