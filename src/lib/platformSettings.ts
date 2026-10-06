@@ -107,8 +107,63 @@ let hasLoaded = false;
 let inflight: Promise<PlatformConfig> | null = null;
 const listeners = new Set<(config: PlatformConfig) => void>();
 
+/**
+ * The live-update channel, or null before it has been opened.
+ *
+ * Module-level like the cache itself, because there is exactly one settings
+ * store for the whole tab and therefore exactly one channel. Consumers are the
+ * maintenance gate, the Navbar, the Footer and the exam entry points; opening a
+ * channel per consumer would open one per component mount.
+ */
+let realtimeChannel: any = null;
+
 function emit() {
   for (const listener of listeners) listener(cache);
+}
+
+/**
+ * Keep the shared store in step with the database without a page reload.
+ *
+ * WHY THIS IS NEEDED
+ *
+ * `loadPlatformConfig` fetches once and caches for the life of the tab. Without
+ * this channel, an admin switching maintenance mode on would reach an
+ * already-open student tab only on its next reload — the student would keep
+ * working straight through the switch. The gate in App.tsx is only as live as
+ * the value it reads.
+ *
+ * ONE CHANNEL, EVER
+ *
+ * The `realtimeChannel` guard makes this idempotent, so calling it from every
+ * successful load cannot accumulate subscriptions. Started on the first load
+ * rather than at module scope, so a build with no Supabase client (or a test
+ * render) never opens a socket.
+ *
+ * `event: '*'` and an unread payload: any change to the row means "re-read the
+ * truth", which covers INSERT (the first save of a category), UPDATE and DELETE
+ * through one path instead of three. The reload is funnelled through
+ * `refreshPlatformSettings`, so the cache is invalidated and every subscriber is
+ * notified by the code path that already does exactly that — there is no second
+ * state system.
+ *
+ * RLS applies to Realtime exactly as it does to a select, so a signed-out
+ * visitor receives changes to the `general` row only (migration 0056) and a
+ * signed-in user receives every category. That is the same visibility each
+ * audience already has on a plain read, so nothing is widened.
+ */
+function startRealtimeSync() {
+  if (!supabase || realtimeChannel) return;
+
+  realtimeChannel = supabase
+    .channel('platform_settings_live')
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'platform_settings' },
+      () => {
+        void refreshPlatformSettings();
+      }
+    )
+    .subscribe();
 }
 
 /**
@@ -236,6 +291,9 @@ export function loadPlatformConfig(): Promise<PlatformConfig> {
     hasLoaded = true;
     inflight = null;
     emit();
+    // Started here rather than in a hook so it is opened by the first load and
+    // then shared by every consumer, exactly like the cache above.
+    startRealtimeSync();
     return cache;
   })();
 

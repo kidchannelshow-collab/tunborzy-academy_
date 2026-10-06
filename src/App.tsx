@@ -39,7 +39,24 @@ import { useEffect } from 'react';
 import { supabase } from './supabaseClient';
 import { useProfile, getProfileCache } from './lib/useProfile';
 import { useGeneralSettings } from './lib/platformSettings';
+import { isAdminRole } from './lib/roles';
 import MaintenanceScreen from './components/MaintenanceScreen';
+
+/**
+ * Views that stay reachable while maintenance mode is on.
+ *
+ * `currentView` is already normalised, so every landing section — home, about,
+ * contact, features, portals — arrives here as 'landing' and is covered by the
+ * one entry.
+ *
+ * Login and sign-up are on this list deliberately, and it is the whole point:
+ * the gate used to replace EVERY view, so an administrator who was signed out
+ * could not reach the sign-in form, could not become an administrator, and
+ * therefore could not switch maintenance back off. The setting was a one-way
+ * door. Public pages also have to stay up — a maintenance notice is only useful
+ * if a visitor can read it.
+ */
+const PUBLIC_VIEWS: readonly string[] = ['landing', 'login', 'signup'];
 
 export default function App() {
   const [currentView, setCurrentView] = useState<'landing' | 'signup' | 'login' | 'dashboard' | 'cbt' | 'utme' | 'resources' | 'academic-materials' | 'post-utme-learning' | 'analytics' | 'profile' | 'settings' | 'lecturer_dashboard' | 'admin_dashboard' | 'announcements' | 'ai' | 'help_support'>('landing');
@@ -173,40 +190,69 @@ export default function App() {
   };
 
   /**
-   * Global maintenance gate.
+   * Shown while the app does not yet know who the visitor is.
    *
-   * `maintenance_mode` lives in `platform_settings.general` and is read by every
-   * visitor, signed in or not (migration 0056 makes that row publicly readable —
-   * without it a signed-out visitor would read zero rows and this gate could
-   * never fire on the login or sign-up pages).
-   *
-   * Admins are deliberately exempt: the whole point is that they can still reach
-   * System Settings to switch maintenance back off. The check is against the
-   * profile role, and the database enforces the same rule independently — only
-   * an Admin can write the setting via the admin-only settings endpoint — so
-   * hiding the screen from admins here is a convenience, not the security
-   * boundary.
+   * Extracted into a const because the maintenance gate below can also need it:
+   * a signed-in user whose profile has not arrived yet must wait rather than be
+   * classified.
    */
-  // `!isLoadingSession` matters: while the profile is still resolving,
-  // `userProfile` is null and an admin would be shown the maintenance screen
-  // before their role arrives. Falling through to the session spinner instead
-  // means the role is always known before this decision is made.
-  if (!isLoadingSession && platformSettings.maintenance_mode && userProfile?.role !== 'Admin') {
-    return <MaintenanceScreen />;
+  const sessionSpinner = (
+    <div className="min-h-[100dvh] bg-[#020617] flex items-center justify-center">
+      <div className="flex flex-col items-center gap-4">
+        <svg className="animate-spin h-8 w-8 text-amber-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <p className="text-slate-400 font-body text-sm">Loading session...</p>
+      </div>
+    </div>
+  );
+
+  // Nothing can be decided until the role is known, so this is checked first.
+  if (isLoadingSession) {
+    return sessionSpinner;
   }
 
-  if (isLoadingSession) {
-    return (
-      <div className="min-h-[100dvh] bg-[#020617] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <svg className="animate-spin h-8 w-8 text-amber-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-          <p className="text-slate-400 font-body text-sm">Loading session...</p>
-        </div>
-      </div>
-    );
+  /**
+   * Global maintenance gate.
+   *
+   * `maintenance_mode` lives in `platform_settings.general`, is written only by
+   * the admin-only settings endpoint, and is read by every visitor, signed in or
+   * not (migration 0056 makes that row publicly readable — without it a
+   * signed-out visitor would read zero rows).
+   *
+   * TWO CONDITIONS, BOTH REQUIRED
+   *
+   * It fires only on a PROTECTED view. Public pages stay up: a maintenance
+   * notice is useless if the visitor cannot reach the page carrying it, and the
+   * sign-in form has to remain reachable or an administrator who is signed out
+   * can never get back in to switch the setting off.
+   *
+   * It fires only for a NON-ADMIN. `isAdminRole` accepts 'Admin', 'admin' and
+   * 'Super Admin', matching `requireAdmin` in server.ts; the earlier literal
+   * `!== 'Admin'` comparison locked out administrators stored under the other
+   * two spellings. The two tests must stay identical — a divergence is a
+   * lockout.
+   *
+   * The database enforces the same rule independently: maintenance mode is
+   * admin-only at the RLS layer and behind `requireAdmin`, so hiding this screen
+   * is a convenience, not the security boundary.
+   */
+  if (
+    platformSettings.maintenance_mode &&
+    !PUBLIC_VIEWS.includes(currentView) &&
+    !isAdminRole(userProfile?.role)
+  ) {
+    // A signed-in user whose profile has not arrived yet. Returning the spinner
+    // rather than the maintenance screen is what stops an administrator being
+    // treated as an ordinary user before their role loads — the previous code
+    // decided on a null profile and could strand them outside the one surface
+    // that can switch maintenance off. The window closes as soon as the profile
+    // resolves, and a visitor with no session is redirected to the public login
+    // page by the router, so this cannot become a permanent state.
+    if (!userProfile) return sessionSpinner;
+
+    return <MaintenanceScreen />;
   }
 
   return (

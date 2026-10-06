@@ -48,6 +48,135 @@ function createSupabaseClient(options?: Parameters<typeof createClient>[2]) {
 const supabase = createSupabaseClient();
 
 /**
+ * Administrator guard shared by every `/api/admin/*` route.
+ *
+ * WHY IT EXISTS
+ *
+ * Five routes each carried their own copy of "read the bearer token, call
+ * `auth.getUser`, look the caller's role up in `profiles`, compare it to the
+ * string 'Admin'". That comparison was case-sensitive and single-valued, so an
+ * account stored as 'admin' or 'Super Admin' — both of which the login screen
+ * and the admin-provisioning Edge Function already accept — was refused with
+ * "Forbidden: Admin access required" while being an administrator. The copies
+ * also discarded the Supabase error from the profile lookup, so a failed query
+ * (RLS, connectivity, a renamed column) was indistinguishable from a genuine
+ * non-admin and reported as one.
+ *
+ * WHAT IT DOES
+ *
+ * It sends the response itself and returns null when the caller is not allowed,
+ * so a route needs only:
+ *
+ *   const admin = await requireAdmin(req, res);
+ *   if (!admin) return;
+ *
+ * Authorization is unchanged and nothing is made public: the token must still
+ * be valid, the profile row must exist, and the role must still be an
+ * administrator role. The role is lower-cased and trimmed for COMPARISON ONLY —
+ * the stored value is never rewritten. No service-role key is involved and the
+ * lookup runs as the caller, so RLS applies exactly as it did before.
+ *
+ * The role is read from the database, never from `user_metadata`: metadata is
+ * client-writable, so trusting it would let any signed-in user promote
+ * themselves.
+ */
+async function requireAdmin(req: any, res: any) {
+  const result = await resolveAdmin(req);
+  // `=== false`, not `!result.ok`. This project's tsconfig does not enable
+  // `strict`, so `strictNullChecks` is off and TypeScript will NOT narrow a
+  // union by the truthiness of its discriminant — `!result.ok` leaves
+  // `result` as the full union and `result.status` then fails to compile.
+  // An explicit comparison to the literal narrows correctly.
+  if (result.ok === false) {
+    res.status(result.status).json({ error: result.error });
+    return null;
+  }
+  return { user: result.user, sbCaller: result.sbCaller };
+}
+
+/**
+ * Who counts as an administrator.
+ *
+ * Kept identical to `isAdminRole` in src/lib/roles.ts — the frontend and this
+ * file are separate bundles, so the same test has to exist in both. They decide
+ * different things (this one decides who may write settings; that one decides
+ * who is let past the maintenance screen) but a disagreement between them is an
+ * administrator lockout, so any change to one belongs in the other.
+ */
+function isAdminRole(role: unknown): boolean {
+  return typeof role === 'string' && ['admin', 'super admin'].includes(role.trim().toLowerCase());
+}
+
+/** The outcome of an admin check, as data rather than as a written response. */
+type AdminResolution =
+  | { ok: true; user: any; sbCaller: ReturnType<typeof createSupabaseClient> }
+  | { ok: false; status: number; error: string };
+
+/**
+ * The body of the administrator check, with no side effects.
+ *
+ * Split out of `requireAdmin` so a caller can ask "is this an administrator?"
+ * WITHOUT the answer being written to the response. The maintenance guard needs
+ * exactly that: when maintenance is on and the caller is not an admin it must
+ * answer 503, and it cannot do that if the admin check has already sent a 401 or
+ * a 403. `requireAdmin` remains the only thing allowed to write those responses,
+ * and its behaviour — status codes, messages, logging — is unchanged.
+ */
+async function resolveAdmin(req: any): Promise<AdminResolution> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return { ok: false, status: 401, error: 'Unauthorized: Missing or invalid token' };
+  }
+
+  const token = authHeader.split(' ')[1];
+  const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+  if (authError || !user) {
+    return { ok: false, status: 401, error: 'Unauthorized: Invalid token' };
+  }
+
+  // Caller-JWT client. `supabase` above is the shared anon client (publishable
+  // key, no user session), so this query would otherwise be evaluated by RLS as
+  // `anon`, match no rows, and hand a 403 to every administrator.
+  const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
+  const { data: profile, error: profileError } = await sbCaller
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  // "No profile row" is a legitimate answer, not a failure: PostgREST reports it
+  // as PGRST116 / "The result contains 0 rows", and this client library surfaces
+  // that as an error rather than as null data. It falls through to the 403
+  // below — a user who exists in auth but has no profile is simply not an
+  // administrator. Any OTHER error (RLS, connectivity, a renamed column) is a
+  // real failure and must not be disguised as "not an admin", which is exactly
+  // what made the original bug take a production log to find.
+  const noProfileRow =
+    !!profileError &&
+    (profileError.code === 'PGRST116' || /0 rows/i.test(String(profileError.details || '')));
+
+  if (profileError && !noProfileRow) {
+    // The user id is safe to log; the token never is.
+    console.error(
+      `[admin-guard] profiles lookup failed for user ${user.id}: ` +
+        `${profileError.code || ''} ${profileError.message}`.trim()
+    );
+    return { ok: false, status: 500, error: 'Unable to verify administrator access' };
+  }
+
+  const isAdmin = isAdminRole(profile?.role);
+  console.log(
+    `[admin-guard] user=${user.id} role=${profile ? JSON.stringify(profile.role) : '(no profile row)'} allowed=${isAdmin}`
+  );
+
+  if (!isAdmin) {
+    return { ok: false, status: 403, error: 'Forbidden: Admin access required' };
+  }
+
+  return { ok: true, user, sbCaller };
+}
+
+/**
  * Read the `cbt` category from `platform_settings` for a server-side gate.
  *
  * The admin's session switches are only real if the SERVER refuses to start an
@@ -94,6 +223,129 @@ async function readCbtSettings(sb: ReturnType<typeof createSupabaseClient>) {
     console.warn('[Platform Settings] CBT settings read failed, assuming open:', err);
     return defaults;
   }
+}
+
+/**
+ * Maintenance mode, enforced on the server.
+ *
+ * WHY THE FRONTEND GATE IS NOT ENOUGH
+ *
+ * App.tsx swaps in <MaintenanceScreen/> before any view renders, which covers
+ * every route and every direct URL. It does not cover the API: a student holding
+ * a stale bundle, or simply calling the endpoint, could still start an exam or
+ * send a chat while the platform was "closed". The gate has to exist where the
+ * data is served, not only where it is rendered.
+ *
+ * FAIL OPEN, LIKE readCbtSettings ABOVE
+ *
+ * A transient settings outage must not take the whole API down with it. Every
+ * failure path here — a query error, a missing row, a malformed blob — reads as
+ * "not in maintenance", which is the safe direction: the worst case is that the
+ * frontend gate alone is doing the work for a few seconds, rather than every
+ * user being locked out by a blip.
+ *
+ * WHY THE ANON CLIENT IS CORRECT HERE
+ *
+ * This reads with the shared anon client, which can see the `general` row only
+ * because migration 0056 grants it. That is deliberate and is the same grant the
+ * frontend gate depends on, so the two cannot disagree about whether maintenance
+ * is on. It also means the check runs before the caller is authenticated — which
+ * it must, since a signed-out caller is exactly who needs to be stopped. If the
+ * 0056 policy is absent, this returns zero rows and the guard silently never
+ * fires; migration 0058 restates the policy for that reason.
+ *
+ * CACHED BRIEFLY
+ *
+ * Without a cache this would add a database round-trip to every API request.
+ * The window is short, and an admin's own save invalidates it immediately
+ * (`invalidateMaintenanceCache` in the settings PUT), so the switch takes effect
+ * for the admin at once and for everything else within the TTL.
+ */
+const MAINTENANCE_CACHE_MS = 10_000;
+let maintenanceCache: { value: boolean; at: number } = { value: false, at: 0 };
+
+/** Force the next check to hit the database. Called after a settings save. */
+function invalidateMaintenanceCache() {
+  maintenanceCache = { value: false, at: 0 };
+}
+
+async function isMaintenanceModeOn(sb: ReturnType<typeof createSupabaseClient>): Promise<boolean> {
+  const now = Date.now();
+  if (now - maintenanceCache.at < MAINTENANCE_CACHE_MS) return maintenanceCache.value;
+
+  try {
+    const { data, error } = await sb
+      .from('platform_settings')
+      .select('settings')
+      .eq('category', 'general')
+      .maybeSingle();
+
+    // An error, a hidden row or a missing key all mean "cannot tell", which
+    // reads as open.
+    if (error || !data || !data.settings || typeof data.settings !== 'object') return false;
+
+    const value = (data.settings as Record<string, any>).maintenance_mode === true;
+    maintenanceCache = { value, at: now };
+    return value;
+  } catch (err) {
+    console.warn('[Maintenance] settings read failed, assuming open:', err);
+    return false;
+  }
+}
+
+/**
+ * Endpoints that keep working while maintenance mode is on.
+ *
+ * `/api/admin/*` is the whole administrator surface, including the settings
+ * endpoint that switches maintenance back off — blocking it would make the
+ * setting a one-way door. `/api/health` is how a deployment is checked, and it
+ * is most needed precisely when the platform is closed.
+ *
+ * NOTE ON AUTHENTICATION: there are no authentication endpoints on this server.
+ * Sign-in, sign-up and session refresh go straight from the browser to Supabase
+ * GoTrue, so nothing here can block them; the `/api/auth` prefix is listed so a
+ * future route in that shape is never accidentally locked out.
+ *
+ * NOTE ON THE PAYMENT WEBHOOK: it is a server-to-server callback from
+ * Flutterwave, not a user-facing request. Blocking it would silently drop
+ * payment confirmations for the duration of the maintenance window, so it is
+ * exempt. Nothing is exposed by this — the route authenticates the caller by
+ * signature hash, not by session.
+ */
+function isMaintenanceExemptPath(path: string): boolean {
+  return (
+    path === '/api/health' ||
+    path.startsWith('/api/admin') ||
+    path.startsWith('/api/auth') ||
+    path === '/api/payments/webhook'
+  );
+}
+
+/**
+ * Refuse normal API traffic while maintenance mode is on — unless the caller is
+ * an administrator, who must always be able to get in and switch it back off.
+ */
+async function maintenanceGuard(req: any, res: any, next: any) {
+  // CORS preflight carries no credentials and must not be answered with a 503,
+  // or the browser reports a CORS failure instead of the real state.
+  if (req.method === 'OPTIONS') return next();
+
+  // Express strips the mount path inside a mounted handler, so this rebuilds the
+  // full path (`/api/health`, not `/health`) to compare against.
+  const fullPath = `${req.baseUrl || ''}${req.path || ''}`;
+
+  // Cheapest test first: an exempt path never touches the database, so health
+  // checks, the admin surface and the payment webhook cost nothing here.
+  if (isMaintenanceExemptPath(fullPath)) return next();
+
+  if (!(await isMaintenanceModeOn(supabase))) return next();
+
+  // Maintenance is on. An administrator is still let through — this is the same
+  // check the /api/admin routes use, so there is no second notion of "admin".
+  const resolution = await resolveAdmin(req);
+  if (resolution.ok) return next();
+
+  return res.status(503).json({ error: 'Maintenance mode is enabled' });
 }
 
 /**
@@ -182,6 +434,11 @@ function createApp() {
     console.log(`[API Request] ${req.method} ${req.originalUrl || req.url}`);
     next();
   });
+
+  // Maintenance gate. Runs ahead of every /api route below, so a closed platform
+  // is closed on the server and not merely in the browser. Exempt paths — health,
+  // the whole admin surface, and the payment webhook — pass straight through.
+  app.use('/api', maintenanceGuard);
 
   // API Health check endpoint
   app.get('/api/health', (req, res) => {
@@ -1918,35 +2175,11 @@ Instructions:
   // Platform Settings Endpoints
   app.get('/api/admin/settings', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-      }
-      const token = authHeader.split(' ')[1];
-      const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-      if (authError || !user) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid token' });
-      }
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
+      const { sbCaller } = admin;
 
-      // Check if user is Admin
-      // The role lookup MUST run with the CALLER's JWT.
-      //
-      // `supabase` is the shared anon client — publishable key, no user session —
-      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
-      // to every admin. Settings, system health and audit logs were therefore
-      // unusable for exactly the people meant to use them.
-      //
-      // RLS is unchanged and no policy was relaxed: the query simply runs as the
-      // authenticated caller, who is permitted to read their own profile row.
-      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
-      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
-      if (!profile || profile.role !== 'Admin') {
-        return res.status(403).json({ error: 'Forbidden: Admin access required' });
-      }
-
-      // Use the caller's JWT so RLS evaluates this as `authenticated`, not `anon`.
-      const sbAdminCtx = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
-      const { data: settings, error: settingsError } = await sbAdminCtx.from('platform_settings').select('*');
+      const { data: settings, error: settingsError } = await sbCaller.from('platform_settings').select('*');
       if (settingsError) throw settingsError;
 
       res.json({ settings: settings || [] });
@@ -1958,31 +2191,9 @@ Instructions:
 
   app.put('/api/admin/settings', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-      }
-      const token = authHeader.split(' ')[1];
-      const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-      if (authError || !user) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid token' });
-      }
-
-      // Check if user is Admin
-      // The role lookup MUST run with the CALLER's JWT.
-      //
-      // `supabase` is the shared anon client — publishable key, no user session —
-      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
-      // to every admin. Settings, system health and audit logs were therefore
-      // unusable for exactly the people meant to use them.
-      //
-      // RLS is unchanged and no policy was relaxed: the query simply runs as the
-      // authenticated caller, who is permitted to read their own profile row.
-      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
-      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
-      if (!profile || profile.role !== 'Admin') {
-        return res.status(403).json({ error: 'Forbidden: Admin access required' });
-      }
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
+      const { user, sbCaller } = admin;
 
       const { category, settings } = req.body;
       if (!category || !settings) {
@@ -2021,15 +2232,12 @@ Instructions:
         }
       }
 
-      // Use the caller's JWT so RLS evaluates this as `authenticated`, not `anon`.
-      const sbAdminCtx = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
-
       // Fetch old value for audit logging if possible
-      const { data: oldRecord } = await sbAdminCtx.from('platform_settings').select('settings').eq('category', category).maybeSingle();
+      const { data: oldRecord } = await sbCaller.from('platform_settings').select('settings').eq('category', category).maybeSingle();
       const oldValue = oldRecord ? oldRecord.settings : {};
 
       // Upsert settings
-      const { error: upsertError } = await sbAdminCtx
+      const { error: upsertError } = await sbCaller
         .from('platform_settings')
         .upsert([{
           category,
@@ -2040,10 +2248,15 @@ Instructions:
 
       if (upsertError) throw upsertError;
 
+      // The maintenance guard caches the flag for a few seconds. An admin
+      // switching it must not then be told by their own backend that nothing
+      // changed, so the cache is dropped the moment the row is written.
+      if (category === 'general') invalidateMaintenanceCache();
+
       // Audit logging. PostgREST returns errors rather than throwing, so the
       // result is inspected explicitly — a silent catch here would hide a real
       // failure. Logging never fails the settings save.
-      const { error: auditError } = await sbAdminCtx.from('audit_logs').insert([{
+      const { error: auditError } = await sbCaller.from('audit_logs').insert([{
         user_id: user.id,
         performed_by: user.email || user.id,
         action: 'UPDATE_PLATFORM_SETTING',
@@ -2071,30 +2284,9 @@ Instructions:
   // tab in System Settings always reported "Failed to check system health".
   app.get('/api/admin/system-health', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-      }
-      const token = authHeader.split(' ')[1];
-      const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-      if (authError || !user) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid token' });
-      }
-
-      // The role lookup MUST run with the CALLER's JWT.
-      //
-      // `supabase` is the shared anon client — publishable key, no user session —
-      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
-      // to every admin. Settings, system health and audit logs were therefore
-      // unusable for exactly the people meant to use them.
-      //
-      // RLS is unchanged and no policy was relaxed: the query simply runs as the
-      // authenticated caller, who is permitted to read their own profile row.
-      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
-      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
-      if (!profile || profile.role !== 'Admin') {
-        return res.status(403).json({ error: 'Forbidden: Admin access required' });
-      }
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
+      const { user } = admin;
 
       // Probe each dependency independently so one outage does not mask the rest.
       const dbOk = !(await supabase.from('profiles').select('id', { count: 'exact', head: true })).error;
@@ -2120,30 +2312,8 @@ Instructions:
 
   app.get('/api/admin/system-health-extended', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-      }
-      const token = authHeader.split(' ')[1];
-      const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-      if (authError || !user) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid token' });
-      }
-
-      // The role lookup MUST run with the CALLER's JWT.
-      //
-      // `supabase` is the shared anon client — publishable key, no user session —
-      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
-      // to every admin. Settings, system health and audit logs were therefore
-      // unusable for exactly the people meant to use them.
-      //
-      // RLS is unchanged and no policy was relaxed: the query simply runs as the
-      // authenticated caller, who is permitted to read their own profile row.
-      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
-      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
-      if (!profile || profile.role !== 'Admin') {
-        return res.status(403).json({ error: 'Forbidden: Admin access required' });
-      }
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
 
       // Fetch entity counts safely using count queries
       const [
@@ -2200,34 +2370,11 @@ Instructions:
   // Admin Audit Logs API
   app.get('/api/admin/audit-logs', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-      }
-      const token = authHeader.split(' ')[1];
-      const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-      if (authError || !user) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid token' });
-      }
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
+      const { sbCaller } = admin;
 
-      // The role lookup MUST run with the CALLER's JWT.
-      //
-      // `supabase` is the shared anon client — publishable key, no user session —
-      // so RLS evaluated this query as `anon`, matched no rows, and handed a 403
-      // to every admin. Settings, system health and audit logs were therefore
-      // unusable for exactly the people meant to use them.
-      //
-      // RLS is unchanged and no policy was relaxed: the query simply runs as the
-      // authenticated caller, who is permitted to read their own profile row.
-      const sbCaller = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
-      const { data: profile } = await sbCaller.from('profiles').select('role').eq('id', user.id).maybeSingle();
-      if (!profile || profile.role !== 'Admin') {
-        return res.status(403).json({ error: 'Forbidden: Admin access required' });
-      }
-
-      // Use the caller's JWT so RLS evaluates this as `authenticated`, not `anon`.
-      const sbAdminCtx = createSupabaseClient({ global: { headers: { Authorization: authHeader } } });
-      const { data: logs, error: logsErr } = await sbAdminCtx
+      const { data: logs, error: logsErr } = await sbCaller
         .from('audit_logs')
         .select('*')
         .order('created_at', { ascending: false })
