@@ -24,48 +24,84 @@ import {
  */
 function CoursePicker({
   courses,
+  programme,
+  onProgrammeChange,
   selected,
   onToggle,
   emptyLabel,
 }: {
   courses: AssignableCourse[];
+  programme: string;
+  onProgrammeChange: (programme: string) => void;
   selected: string[];
   onToggle: (id: string) => void;
   emptyLabel: string;
 }) {
-  if (courses.length === 0) {
-    return <div className="p-3 text-xs text-slate-500 border border-slate-700 rounded-xl">{emptyLabel}</div>;
-  }
+  // The programme dropdown narrows the list. `All` groups by programme so the
+  // three sections stay readable; a specific programme renders its own courses
+  // only. The dropdown's options are always all three, so a programme can never
+  // become unreachable once its courses are all assigned.
+  const visible = programme === 'All' ? courses : courses.filter((c) => c.portal === programme);
+  const grouped = programme === 'All';
 
   return (
-    <div className="border border-slate-700 rounded-xl max-h-56 overflow-y-auto custom-scrollbar divide-y divide-slate-800">
-      {ASSIGNABLE_PORTALS.map((portal) => {
-        const group = courses.filter((c) => c.portal === portal);
-        if (group.length === 0) return null;
-        return (
-          <div key={portal}>
-            <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-[#020617] sticky top-0">
-              {portal}
-            </div>
-            {group.map((course) => (
-              <label key={course.id} className="flex items-center gap-3 px-3 py-2 hover:bg-slate-800/40 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(course.id)}
-                  onChange={() => onToggle(course.id)}
-                  className="w-4 h-4 accent-emerald-600 rounded cursor-pointer"
-                />
-                <span className="text-sm text-white truncate">
-                  {course.course_code ? `${course.course_code} — ` : ''}{course.title}
-                </span>
-                {course.takenByAnotherLecturer && (
-                  <span className="ml-auto text-[10px] font-bold text-amber-400 whitespace-nowrap">assigned</span>
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">
+          Programme / Level
+        </label>
+        <select
+          value={programme}
+          onChange={(e) => onProgrammeChange(e.target.value)}
+          className="flex-1 bg-[#020617] border border-slate-700 text-white rounded-xl px-3 py-2 text-sm focus:border-emerald-500 outline-none"
+        >
+          <option value="All">All programmes</option>
+          {ASSIGNABLE_PORTALS.map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
+        {selected.length > 0 && (
+          <span className="text-xs font-bold text-emerald-400 whitespace-nowrap">{selected.length} selected</span>
+        )}
+      </div>
+
+      {visible.length === 0 ? (
+        <div className="p-3 text-xs text-slate-500 border border-slate-700 rounded-xl">
+          {courses.length === 0 ? emptyLabel : `No ${programme} courses to show.`}
+        </div>
+      ) : (
+        <div className="border border-slate-700 rounded-xl max-h-56 overflow-y-auto custom-scrollbar divide-y divide-slate-800">
+          {(grouped ? ASSIGNABLE_PORTALS : ([programme] as readonly string[])).map((portal) => {
+            const group = visible.filter((c) => c.portal === portal);
+            if (group.length === 0) return null;
+            return (
+              <div key={portal}>
+                {grouped && (
+                  <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-[#020617] sticky top-0">
+                    {portal}
+                  </div>
                 )}
-              </label>
-            ))}
-          </div>
-        );
-      })}
+                {group.map((course) => (
+                  <label key={course.id} className="flex items-center gap-3 px-3 py-2 hover:bg-slate-800/40 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(course.id)}
+                      onChange={() => onToggle(course.id)}
+                      className="w-4 h-4 accent-emerald-600 rounded cursor-pointer"
+                    />
+                    <span className="text-sm text-white truncate">
+                      {course.course_code ? `${course.course_code} — ` : ''}{course.title}
+                    </span>
+                    {course.takenByAnotherLecturer && (
+                      <span className="ml-auto text-[10px] font-bold text-amber-400 whitespace-nowrap">assigned</span>
+                    )}
+                  </label>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -122,6 +158,20 @@ export default function LecturerManagement() {
 
   /** Course codes assigned to a lecturer, from `courses.lecturer_id`. */
   const courseCodesFor = (lecturerId: string): string[] => lecturerCourseCodes[lecturerId] || [];
+
+  /**
+   * Programme currently shown in the course picker.
+   *
+   * The picker used to list all three programmes at once in one long scroll.
+   * Selecting a programme narrows it to that programme's courses, which is how an
+   * admin actually works — they are assigning "the UTME courses", not picking
+   * from a mixed bag. Defaults to `All` so nothing is hidden until asked for.
+   *
+   * This is a VIEW filter over `availableCourses` only. It does not restrict what
+   * may be assigned: Undergraduate is still assignable here even though the
+   * lecturer dashboard deliberately never offers it.
+   */
+  const [pickerProgramme, setPickerProgramme] = useState<string>('All');
 
   useEffect(() => {
     if (!supabase) return;
@@ -582,10 +632,12 @@ export default function LecturerManagement() {
                   </div>
                   <div className="md:col-span-2">
                     <label className="block text-sm font-poppins text-slate-400 mb-1">
-                      Assigned Courses {selectedCourseIds.length > 0 && <span className="text-emerald-400">({selectedCourseIds.length} selected)</span>}
+                      Assigned Courses
                     </label>
                     <CoursePicker
                       courses={availableCourses}
+                      programme={pickerProgramme}
+                      onProgrammeChange={setPickerProgramme}
                       selected={selectedCourseIds}
                       onToggle={toggleSelectedCourse}
                       emptyLabel="No courses found. Create courses under Course Management first."
@@ -657,10 +709,12 @@ export default function LecturerManagement() {
                   </div>
                   <div className="md:col-span-2">
                     <label className="block text-sm font-poppins text-slate-400 mb-1">
-                      Assigned Courses {selectedCourseIds.length > 0 && <span className="text-emerald-400">({selectedCourseIds.length} selected)</span>}
+                      Assigned Courses
                     </label>
                     <CoursePicker
                       courses={availableCourses}
+                      programme={pickerProgramme}
+                      onProgrammeChange={setPickerProgramme}
                       selected={selectedCourseIds}
                       onToggle={toggleSelectedCourse}
                       emptyLabel="No courses found. Create courses under Course Management first."

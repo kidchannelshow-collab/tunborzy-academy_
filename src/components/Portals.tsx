@@ -86,13 +86,25 @@ export default function Portals() {
               <p className="text-sm md:text-base text-slate-400 flex-1 leading-relaxed font-body font-normal">
                 {portal.description}
               </p>
-              <motion.button 
-                whileHover={{ scale: 1.05, textShadow: "0 0 8px rgba(96, 165, 250, 0.5)" }}
-                whileTap={{ scale: 0.95 }}
-                className="text-xs font-action font-semibold text-blue-400 uppercase tracking-widest text-left mt-4 flex items-center gap-2 w-fit relative after:content-[''] after:absolute after:-bottom-1 after:left-0 after:w-full after:h-[1px] after:bg-blue-400 after:scale-x-0 after:origin-right hover:after:scale-x-100 hover:after:origin-left after:transition-transform"
-              >
-                Learn More <ArrowRight className="w-4 h-4" />
-              </motion.button>
+              {/*
+                "Learn More" is hidden on the UTME and Undergraduate cards by
+                request. It is a decorative button with no onClick — it navigates
+                nowhere and opens nothing — so hiding it removes a dead control
+                rather than a working one.
+
+                Post-UTME is deliberately left untouched: only UTME and
+                Undergraduate were named, and removing it there too is a
+                one-line change if that is wanted.
+              */}
+              {portal.id !== 'utme' && portal.id !== 'undergraduate' && (
+                <motion.button
+                  whileHover={{ scale: 1.05, textShadow: "0 0 8px rgba(96, 165, 250, 0.5)" }}
+                  whileTap={{ scale: 0.95 }}
+                  className="text-xs font-action font-semibold text-blue-400 uppercase tracking-widest text-left mt-4 flex items-center gap-2 w-fit relative after:content-[''] after:absolute after:-bottom-1 after:left-0 after:w-full after:h-[1px] after:bg-blue-400 after:scale-x-0 after:origin-right hover:after:scale-x-100 hover:after:origin-left after:transition-transform"
+                >
+                  Learn More <ArrowRight className="w-4 h-4" />
+                </motion.button>
+              )}
             </motion.div>
           ))}
         </div>

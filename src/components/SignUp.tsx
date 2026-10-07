@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { User, Mail, Lock, Eye, EyeOff, CheckCircle2, Circle, ChevronDown, Search, Building, BookOpen, Shield, Key, Tag } from 'lucide-react';
+import { User, Mail, Lock, Eye, EyeOff, CheckCircle2, Circle, ChevronDown, Building, BookOpen, Shield, Key, Tag } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { refreshProfile } from '../lib/useProfile';
 
@@ -658,9 +658,6 @@ export default function SignUp({ onCancel, onSuccess }: SignUpProps) {
                                   className="block w-full pl-11 pr-4 py-3.5 border border-slate-700 rounded-xl leading-5 bg-[#020617]/50 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500 sm:text-sm transition-all font-body font-normal"
                                   placeholder="e.g. Computer Science"
                                 />
-                                <div className="absolute inset-y-0 right-0 pr-4 flex items-center pointer-events-none">
-                                  <Search className="h-4 w-4 text-slate-500" />
-                                </div>
                               </div>
                             </div>
                           </motion.div>

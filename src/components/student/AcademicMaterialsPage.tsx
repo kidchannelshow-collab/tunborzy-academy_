@@ -67,7 +67,17 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
         // filter by published status where appropriate. 
         // Admin manages Course status as well? In CourseManagement.tsx we saw courseInput.status === 'Published'.
         const activeCourses = data.filter(c => c.status === 'Published');
-        const uniqueLevels = Array.from(new Set(activeCourses.map(c => c.portal))).filter(Boolean);
+        // This is the UNDERGRADUATE academic materials library, so the portal
+        // list is narrowed to Undergraduate.
+        //
+        // It previously derived its list from every published course's portal, so
+        // UTME and Post-UTME appeared here as selectable entries and their
+        // materials were browsable from this page — the two views overlapped.
+        // Each portal has its own surface: Post-UTME has PostUtmeLearningPage,
+        // which filters `.eq('portal', 'Post-UTME')` on both courses and
+        // materials. Filtering here is what keeps the two libraries separate.
+        const undergradCourses = activeCourses.filter(c => c.portal === 'Undergraduate');
+        const uniqueLevels = Array.from(new Set(undergradCourses.map(c => c.portal))).filter(Boolean);
         
         // Also pre-select level if student profile has it
         if (profile?.level && uniqueLevels.includes(profile.level) && !selectedLevel) {

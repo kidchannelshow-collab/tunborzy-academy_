@@ -16,36 +16,78 @@ export default function AuditLog() {
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchLogs = async () => {
-      setLoading(true);
-      if (supabase) {
-        const { data, error } = await supabase
-          .from('audit_logs')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(100);
-        
-        if (!error && data) {
-          setLogs(data.map(d => {
-            const dateObj = new Date(d.created_at);
-            return {
-              id: d.id,
-              action: d.action_details || d.action,
-              admin: d.performed_by || 'System',
-              date: dateObj.toLocaleDateString(),
-              time: dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            };
-          }));
-        } else {
-          setLogs([]);
-        }
-      }
+  /**
+   * Hoisted out of the effect so the Realtime handler below can reuse it — the
+   * subscription and the first paint must run exactly the same query.
+   */
+  const fetchLogs = React.useCallback(async (showSpinner = false) => {
+    if (showSpinner) setLoading(true);
+    if (!supabase) {
       setLoading(false);
-    };
-    
-    fetchLogs();
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('audit_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+
+    if (!error && data) {
+      setLogs(data.map(d => {
+        const dateObj = new Date(d.created_at);
+        return {
+          id: d.id,
+          action: d.action_details || d.action,
+          admin: d.performed_by || 'System',
+          date: dateObj.toLocaleDateString(),
+          time: dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        };
+      }));
+    } else {
+      setLogs([]);
+    }
+    setLoading(false);
   }, []);
+
+  useEffect(() => {
+    fetchLogs(true);
+  }, [fetchLogs]);
+
+  /**
+   * Live audit trail.
+   *
+   * The page fetched once on mount and then never again, so an action taken
+   * while it was open — including the admin's own settings saves, which write
+   * `audit_logs` from the server — only appeared after a manual reload. That is
+   * precisely the screen where staleness is least acceptable, because its whole
+   * purpose is to show what just happened.
+   *
+   * Every event reloads rather than inserting the payload: rows are written by
+   * the API with `action_details`/`performed_by`, and re-reading runs the same
+   * mapping and ordering the initial load uses, so the table cannot drift from
+   * what a refresh would show. Reloads are coalesced because a settings save
+   * writes its audit row immediately before other writes can follow.
+   */
+  useEffect(() => {
+    if (!supabase) return;
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReload = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void fetchLogs(false); }, 500);
+    };
+
+    const channel = supabase
+      .channel('admin_audit_logs_live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs' }, scheduleReload)
+      .subscribe();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      supabase.removeChannel(channel);
+    };
+  }, [fetchLogs]);
 
   const filteredLogs = logs.filter(log => 
     log.action.toLowerCase().includes(searchTerm.toLowerCase()) ||
