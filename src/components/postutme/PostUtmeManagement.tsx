@@ -117,6 +117,38 @@ export default function PostUtmeManagement() {
     // Re-scope when the signed-in role changes (e.g. profile resolves late).
   }, [profile?.id, profile?.role]);
 
+  /**
+   * Live paper and question updates.
+   *
+   * The tables `fetchAll` reads are the ones watched here — the papers, their
+   * questions, and the attempt statistics shown against them. Nothing else
+   * affects what this screen renders, so nothing else is subscribed.
+   *
+   * Reloads are coalesced: a bulk question insert arrives as many events, and
+   * refetching per event would thrash the table and the attempt aggregate.
+   */
+  useEffect(() => {
+    if (!supabase || !profile?.id) return;
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReload = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void fetchAll(); }, 600);
+    };
+
+    const channel = supabase
+      .channel(`post_utme_management_live_${profile.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'post_utme_exams' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'post_utme_questions' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'post_utme_attempts' }, scheduleReload)
+      .subscribe();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      supabase.removeChannel(channel);
+    };
+  }, [profile?.id]);
+
   useEffect(() => {
     if (selectedExamId) fetchQuestions(selectedExamId);
     else {

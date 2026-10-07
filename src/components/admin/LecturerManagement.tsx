@@ -3,7 +3,72 @@ import { motion, AnimatePresence } from 'motion/react';
 import { UserCog, Plus, Search, Edit2, Trash2, BookOpen, Eye, X, Mail, Phone, Book, GraduationCap, Clock, FileText, ChevronLeft, ChevronRight, UserCheck, UserX } from 'lucide-react';
 import ConfirmationModal from './ConfirmationModal';
 import { supabase } from '../../supabaseClient';
+import {
+  loadAssignableCourses,
+  assignCoursesToLecturer,
+  loadAssignedCourseIds,
+  ASSIGNABLE_PORTALS,
+  type AssignableCourse,
+} from '../../lib/lecturerCourses';
 
+/**
+ * Portal-grouped, multi-select course picker for lecturer assignment.
+ *
+ * Declared at MODULE scope on purpose. Defined inside the component it would be a
+ * new component type on every render, so React would unmount and rebuild the
+ * whole list each keystroke in the search box — the same defect that made the
+ * lecturer sidebar lag.
+ *
+ * Replaces a free-text "MCH101, PHY101" box: the admin had to recall codes, a
+ * typo produced a silent no-op, and none of it actually assigned a course.
+ */
+function CoursePicker({
+  courses,
+  selected,
+  onToggle,
+  emptyLabel,
+}: {
+  courses: AssignableCourse[];
+  selected: string[];
+  onToggle: (id: string) => void;
+  emptyLabel: string;
+}) {
+  if (courses.length === 0) {
+    return <div className="p-3 text-xs text-slate-500 border border-slate-700 rounded-xl">{emptyLabel}</div>;
+  }
+
+  return (
+    <div className="border border-slate-700 rounded-xl max-h-56 overflow-y-auto custom-scrollbar divide-y divide-slate-800">
+      {ASSIGNABLE_PORTALS.map((portal) => {
+        const group = courses.filter((c) => c.portal === portal);
+        if (group.length === 0) return null;
+        return (
+          <div key={portal}>
+            <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-[#020617] sticky top-0">
+              {portal}
+            </div>
+            {group.map((course) => (
+              <label key={course.id} className="flex items-center gap-3 px-3 py-2 hover:bg-slate-800/40 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={selected.includes(course.id)}
+                  onChange={() => onToggle(course.id)}
+                  className="w-4 h-4 accent-emerald-600 rounded cursor-pointer"
+                />
+                <span className="text-sm text-white truncate">
+                  {course.course_code ? `${course.course_code} — ` : ''}{course.title}
+                </span>
+                {course.takenByAnotherLecturer && (
+                  <span className="ml-auto text-[10px] font-bold text-amber-400 whitespace-nowrap">assigned</span>
+                )}
+              </label>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function LecturerManagement() {
   const [filterOption, setFilterOption] = useState('All');
@@ -29,6 +94,63 @@ export default function LecturerManagement() {
     full_name: '', email: '', password: '', department: '', faculty: '', phone_number: '', assigned_courses: '', assigned_subjects: ''
   });
 
+  /**
+   * The real assignment UI state.
+   *
+   * `availableCourses` is every course in the system, grouped by portal.
+   * `selectedCourseIds` is the pending selection for whichever modal is open —
+   * nothing is written until the admin saves. `originalCourseIds` is what
+   * `courses.lecturer_id` currently says, so a DESELECTED course can be
+   * released on save (otherwise removing an assignment would be impossible).
+   */
+  const [availableCourses, setAvailableCourses] = useState<AssignableCourse[]>([]);
+  const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
+  const [originalCourseIds, setOriginalCourseIds] = useState<string[]>([]);
+
+  /**
+   * Display source for assigned courses: lecturer profile id -> course codes.
+   *
+   * Derived from `courses.lecturer_id`, which is where an assignment actually
+   * lives. The page used to render `profiles.assigned_courses` here — a text
+   * array the picker never writes — so a lecturer given three courses through
+   * the picker still displayed "No courses assigned".
+   *
+   * This is a READ MODEL, not a second assignment system: nothing writes it, and
+   * it is rebuilt from the database on every `fetchLecturers`.
+   */
+  const [lecturerCourseCodes, setLecturerCourseCodes] = useState<Record<string, string[]>>({});
+
+  /** Course codes assigned to a lecturer, from `courses.lecturer_id`. */
+  const courseCodesFor = (lecturerId: string): string[] => lecturerCourseCodes[lecturerId] || [];
+
+  useEffect(() => {
+    if (!supabase) return;
+    loadAssignableCourses()
+      .then(setAvailableCourses)
+      .catch((err) => console.error('Failed to load courses for assignment:', err));
+  }, []);
+
+  const toggleSelectedCourse = (id: string) =>
+    setSelectedCourseIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  /**
+   * Open the editor with the lecturer's CURRENT server-side assignments checked,
+   * read from `courses.lecturer_id` — not from the legacy `assigned_courses`
+   * text array, which never reflected a real assignment.
+   */
+  const openEditLecturer = async (lecturer: any) => {
+    setEditLecturer(lecturer);
+    setSelectedCourseIds([]);
+    setOriginalCourseIds([]);
+    try {
+      const ids = await loadAssignedCourseIds(lecturer.id);
+      setOriginalCourseIds(ids);
+      setSelectedCourseIds(ids);
+    } catch (err) {
+      console.error('Failed to load assigned courses:', err);
+    }
+  };
+
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
@@ -50,17 +172,46 @@ export default function LecturerManagement() {
   const fetchLecturers = async () => {
     if (!supabase) return;
     setIsLoading(true);
-    const { data, error } = await supabase.from('profiles')
-      .select('*')
-      .ilike('role', 'lecturer')
-      .order('created_at', { ascending: false });
-      
+
+    // The lecturer rows and their assignments are fetched together, because the
+    // assignment is a property of the COURSE (`courses.lecturer_id`), not of the
+    // profile. `not('lecturer_id','is',null)` keeps unassigned courses out
+    // entirely, so the map below only ever holds real assignments.
+    const [lecturersRes, coursesRes] = await Promise.all([
+      supabase.from('profiles')
+        .select('*')
+        .ilike('role', 'lecturer')
+        .order('created_at', { ascending: false }),
+      supabase.from('courses')
+        .select('id, course_code, lecturer_id')
+        .not('lecturer_id', 'is', null),
+    ]);
+
+    const { data, error } = lecturersRes;
+
     if (error) {
       console.log("Error fetching lecturers:", error);
       showNotification(error.message || String(error), 'error');
     } else if (data) {
       setLecturers(data);
     }
+
+    // A failure here only costs the chips; it must not blank the roster, so it is
+    // logged rather than raised into the notification the admin sees.
+    if (coursesRes.error) {
+      console.warn('Could not load course assignments for display:', coursesRes.error.message);
+    } else {
+      const byLecturer: Record<string, string[]> = {};
+      for (const course of coursesRes.data || []) {
+        const owner = (course as any).lecturer_id as string | null;
+        const code = (course as any).course_code as string | null;
+        if (!owner || !code) continue;
+        if (!byLecturer[owner]) byLecturer[owner] = [];
+        byLecturer[owner].push(code);
+      }
+      setLecturerCourseCodes(byLecturer);
+    }
+
     setIsLoading(false);
   };
 
@@ -208,9 +359,23 @@ export default function LecturerManagement() {
         throw new Error(actualError);
       }
 
+      // Courses are assigned only now, because `courses.lecturer_id` needs the
+      // id the provisioning function has just returned. The old code sent a
+      // comma-separated list to the Edge Function, which stored it on the
+      // profile as text and assigned nothing at all.
+      const newLecturerId = fnData?.userId;
+      if (newLecturerId && selectedCourseIds.length > 0) {
+        await assignCoursesToLecturer(newLecturerId, selectedCourseIds, []);
+      } else if (!newLecturerId && selectedCourseIds.length > 0) {
+        console.warn('Lecturer created but no userId was returned; course selection was not applied.');
+      }
+
       showNotification("Lecturer created successfully.", 'success');
       setShowAddModal(false);
       setAddForm({ full_name: '', email: '', password: '', department: '', faculty: '', phone_number: '', assigned_courses: '', assigned_subjects: '' });
+      setSelectedCourseIds([]);
+      // The catalogue's ownership flags changed for any course just assigned.
+      loadAssignableCourses().then(setAvailableCourses).catch(() => {});
       fetchLecturers();
     } catch (err: any) {
       console.log("Error adding lecturer:", err);
@@ -264,11 +429,21 @@ export default function LecturerManagement() {
       const { error } = await supabase.from('profiles').update({
         full_name, department, faculty, phone_number, assigned_courses: coursesArray, assigned_subjects: subjectsArray, status
       }).eq('id', id);
-      
+
       if (error) throw error;
-      
+
+      // THE assignment. `courses.lecturer_id` is authoritative; the profile
+      // update above only keeps the legacy display list in step. Passing the
+      // original ids is what lets a DESELECTED course be released — without it
+      // the lecturer would keep access forever, since only this call ever
+      // clears the column.
+      await assignCoursesToLecturer(id, selectedCourseIds, originalCourseIds);
+
       showNotification("Lecturer profile updated", 'success');
       setEditLecturer(null);
+      setSelectedCourseIds([]);
+      setOriginalCourseIds([]);
+      loadAssignableCourses().then(setAvailableCourses).catch(() => {});
       fetchLecturers();
     } catch (err: any) {
       console.log("Error saving lecturer:", err);
@@ -291,7 +466,10 @@ export default function LecturerManagement() {
         (l.faculty || '').toLowerCase().includes(q) ||
         (l.student_id || '').toLowerCase().includes(q) ||
         (l.role || '').toLowerCase().includes(q) ||
-        (l.assigned_courses || []).some((c) => c.toLowerCase().includes(q))
+        // Searched against the real assignments, so "MTH101" finds the lecturer
+        // who owns it. `l.assigned_courses` is the legacy text array the picker
+        // never writes, and searching it silently returned nothing.
+        courseCodesFor(l.id).some((c) => c.toLowerCase().includes(q))
       );
     }
 
@@ -308,7 +486,10 @@ export default function LecturerManagement() {
     }
 
     return result;
-  }, [lecturers, searchQuery, filterOption]);
+    // `lecturerCourseCodes` must be a dependency: the assignments arrive from a
+    // separate query, so without it the course-code search would run against an
+    // empty map on first render and never re-evaluate.
+  }, [lecturers, searchQuery, filterOption, lecturerCourseCodes]);
 
   const totalPages = Math.ceil(filteredLecturers.length / itemsPerPage) || 1;
   const paginatedLecturers = filteredLecturers.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
@@ -400,8 +581,19 @@ export default function LecturerManagement() {
                     <input type="text" value={addForm.faculty} onChange={(e) => setAddForm({...addForm, faculty: e.target.value})} className="w-full bg-[#020617] border border-slate-700 text-white rounded-xl px-4 py-2 focus:border-emerald-500 outline-none" />
                   </div>
                   <div className="md:col-span-2">
-                    <label className="block text-sm font-poppins text-slate-400 mb-1">Assigned Courses (comma separated)</label>
-                    <input type="text" value={addForm.assigned_courses} onChange={(e) => setAddForm({...addForm, assigned_courses: e.target.value})} placeholder="e.g. MTH101, PHY101" className="w-full bg-[#020617] border border-slate-700 text-white rounded-xl px-4 py-2 focus:border-emerald-500 outline-none" />
+                    <label className="block text-sm font-poppins text-slate-400 mb-1">
+                      Assigned Courses {selectedCourseIds.length > 0 && <span className="text-emerald-400">({selectedCourseIds.length} selected)</span>}
+                    </label>
+                    <CoursePicker
+                      courses={availableCourses}
+                      selected={selectedCourseIds}
+                      onToggle={toggleSelectedCourse}
+                      emptyLabel="No courses found. Create courses under Course Management first."
+                    />
+                    <p className="text-xs text-slate-500 mt-1">
+                      Courses are assigned after the account is created. A course already
+                      assigned to another lecturer will be reassigned to this one.
+                    </p>
                   </div>
                   <div className="md:col-span-2">
                     <label className="block text-sm font-poppins text-slate-400 mb-1">Assigned Subjects (comma separated)</label>
@@ -464,8 +656,18 @@ export default function LecturerManagement() {
                     </select>
                   </div>
                   <div className="md:col-span-2">
-                    <label className="block text-sm font-poppins text-slate-400 mb-1">Assigned Courses (comma separated)</label>
-                    <input type="text" value={Array.isArray(editLecturer.assigned_courses) ? editLecturer.assigned_courses.join(', ') : editLecturer.assigned_courses || ''} onChange={(e) => setEditLecturer({...editLecturer, assigned_courses: e.target.value})} className="w-full bg-[#020617] border border-slate-700 text-white rounded-xl px-4 py-2 focus:border-emerald-500 outline-none" />
+                    <label className="block text-sm font-poppins text-slate-400 mb-1">
+                      Assigned Courses {selectedCourseIds.length > 0 && <span className="text-emerald-400">({selectedCourseIds.length} selected)</span>}
+                    </label>
+                    <CoursePicker
+                      courses={availableCourses}
+                      selected={selectedCourseIds}
+                      onToggle={toggleSelectedCourse}
+                      emptyLabel="No courses found. Create courses under Course Management first."
+                    />
+                    <p className="text-xs text-slate-500 mt-1">
+                      Unchecking a course releases it — the lecturer loses access to it.
+                    </p>
                   </div>
                   <div className="md:col-span-2">
                     <label className="block text-sm font-poppins text-slate-400 mb-1">Assigned Subjects (comma separated)</label>
@@ -571,8 +773,8 @@ export default function LecturerManagement() {
                 <div>
                   <p className="text-xs text-slate-500 uppercase tracking-wider mb-2">Assigned Courses</p>
                   <div className="flex flex-wrap gap-2">
-                    {(viewLecturer.assigned_courses || []).length > 0 ? (
-                      (viewLecturer.assigned_courses || []).map((c: string, i: number) => (
+                    {courseCodesFor(viewLecturer.id).length > 0 ? (
+                      courseCodesFor(viewLecturer.id).map((c: string, i: number) => (
                         <span key={i} className="px-3 py-1 bg-slate-800 text-slate-300 text-xs rounded-lg border border-slate-700">{c}</span>
                       ))
                     ) : <span className="text-slate-500 text-sm">No courses assigned</span>}
@@ -624,7 +826,7 @@ export default function LecturerManagement() {
           <p className="text-sm font-body text-slate-400">Add lecturers, assign subjects, and monitor uploads.</p>
         </div>
         <button 
-          onClick={() => setShowAddModal(true)}
+          onClick={() => { setSelectedCourseIds([]); setShowAddModal(true); }}
           className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 px-4 py-2 rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20"
         >
           <Plus size={16} /> Add Lecturer
@@ -686,7 +888,7 @@ export default function LecturerManagement() {
                     </div>
                     <div className="flex gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
                       <button className="p-2 text-slate-400 hover:text-white transition-colors hover:bg-slate-800 rounded-lg" title="View Profile" onClick={() => setViewLecturer(lecturer)}><Eye size={16}/></button>
-                      <button className="p-2 text-slate-400 hover:text-blue-400 transition-colors hover:bg-slate-800 rounded-lg" title="Edit" onClick={() => setEditLecturer({...lecturer})}><Edit2 size={16}/></button>
+                      <button className="p-2 text-slate-400 hover:text-blue-400 transition-colors hover:bg-slate-800 rounded-lg" title="Edit" onClick={() => openEditLecturer(lecturer)}><Edit2 size={16}/></button>
                       {lecturer.status === 'Suspended' || lecturer.status === 'Disabled' ? (
                         <button className="p-2 text-slate-400 hover:text-emerald-400 transition-colors hover:bg-slate-800 rounded-lg" title="Enable Account" onClick={() => handleToggleStatus(lecturer, 'Active')}><UserCheck size={16}/></button>
                       ) : (
@@ -711,11 +913,11 @@ export default function LecturerManagement() {
                         </div>
                       </>
                     )}
-                    {lecturer.assigned_courses && lecturer.assigned_courses.length > 0 && (
+                    {courseCodesFor(lecturer.id).length > 0 && (
                       <div className="mt-2">
                         <p className="text-xs font-semibold text-slate-500 uppercase">Assigned Courses</p>
                         <div className="flex flex-wrap gap-2 mt-1">
-                          {lecturer.assigned_courses.map((sub: string, i: number) => (
+                          {courseCodesFor(lecturer.id).map((sub: string, i: number) => (
                             <span key={i} className="px-2 py-1 bg-emerald-500/10 text-emerald-400 text-[10px] rounded-md border border-emerald-500/20">
                               {sub}
                             </span>
@@ -744,7 +946,7 @@ export default function LecturerManagement() {
                       {lecturer.status || 'Active'}
                     </span>
                     <div className="flex gap-3">
-                      <button className="text-emerald-400 hover:text-emerald-300 text-[11px] font-semibold transition-colors uppercase tracking-wider" onClick={() => setEditLecturer({...lecturer})}>
+                      <button className="text-emerald-400 hover:text-emerald-300 text-[11px] font-semibold transition-colors uppercase tracking-wider" onClick={() => openEditLecturer(lecturer)}>
                         Assign Courses
                       </button>
                       <button className="text-blue-400 hover:text-blue-300 text-[11px] font-semibold transition-colors uppercase tracking-wider" onClick={() => setAssignMaterialLecturer(lecturer)}>

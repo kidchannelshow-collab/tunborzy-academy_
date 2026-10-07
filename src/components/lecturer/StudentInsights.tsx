@@ -22,6 +22,48 @@ export default function StudentInsights() {
     }
   }, [profile?.id, profile?.role]);
 
+  /**
+   * Live analytics.
+   *
+   * Three tables actually move these numbers, and nothing else does:
+   *
+   *   course_enrollments — a student joining or leaving one of the lecturer's
+   *                        courses changes the directory and the "students
+   *                        attempted" counts;
+   *   cbt_attempts       — a completed sitting changes every performance figure;
+   *   cbt_exams          — a new or retitled exam changes what the rows group by.
+   *
+   * No filter is applied to the subscription. Postgres Changes evaluates RLS per
+   * subscriber, so a lecturer is only ever delivered rows they are already
+   * allowed to read — the scoping above is what keeps the derived numbers
+   * correct, and it is re-run on every event. The reload is coalesced so a burst
+   * of attempts produces one refresh rather than one per row.
+   *
+   * Cleaned up on unmount (and on profile change), so a lecturer who signs out
+   * leaves no channel behind.
+   */
+  useEffect(() => {
+    if (!supabase || !profile?.id) return;
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReload = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void fetchCoursesAndAnalytics(); }, 600);
+    };
+
+    const channel = supabase
+      .channel(`lecturer_analytics_${profile.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'course_enrollments' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cbt_attempts' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cbt_exams' }, scheduleReload)
+      .subscribe();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      supabase.removeChannel(channel);
+    };
+  }, [profile?.id]);
+
   const fetchCoursesAndAnalytics = async () => {
     if (!supabase || !profile) return;
     setLoading(true);
@@ -56,11 +98,55 @@ export default function StudentInsights() {
         setStudents(allProfiles || []);
       }
 
-      // 2. Fetch CBT attempts and questions for aggregate performance
-      const [attemptsRes, questionsRes] = await Promise.all([
-        supabase.from('cbt_attempts').select('*, cbt_exams(id, title, course_code, topic, created_by)').eq('status', 'completed'),
-        supabase.from('cbt_questions').select('id, course_code, topic')
-      ]);
+      // 2. Fetch CBT attempts and questions, SCOPED IN THE QUERY.
+      //
+      // These two previously ran unfiltered, and only the RENDER narrowed them.
+      // That meant a lecturer's browser downloaded every completed attempt and
+      // every question on the platform before discarding the ones it did not
+      // render — other students' rows crossed the wire, and the cost grew with
+      // the whole platform rather than with the lecturer's own courses. The scope
+      // now lives in the request. Admin keeps the platform-wide view.
+      //
+      // Scope follows the same two relationships the render already used:
+      // an exam belongs to a lecturer if they created it, or if its course_code
+      // is one of their assigned courses.
+      const isAdmin = profile.role === 'Admin';
+      const empty = Promise.resolve({ data: [] as any[] });
+
+      const baseAttempts = supabase
+        .from('cbt_attempts')
+        .select('*, cbt_exams(id, title, course_code, topic, created_by)')
+        .eq('status', 'completed');
+      const baseQuestions = supabase.from('cbt_questions').select('id, course_code, topic');
+
+      let attemptsPromise: PromiseLike<{ data: any[] }>;
+      let questionsPromise: PromiseLike<{ data: any[] }>;
+
+      if (isAdmin) {
+        attemptsPromise = baseAttempts as any;
+        questionsPromise = baseQuestions as any;
+      } else {
+        const [ownExamsRes, courseExamsRes] = await Promise.all([
+          supabase.from('cbt_exams').select('id').eq('created_by', profile.id),
+          courseCodes.length > 0
+            ? supabase.from('cbt_exams').select('id').in('course_code', courseCodes)
+            : empty,
+        ]);
+
+        const examIds = Array.from(new Set([
+          ...(ownExamsRes.data || []).map((e: any) => e.id),
+          ...(courseExamsRes.data || []).map((e: any) => e.id),
+        ]));
+
+        // A lecturer with no exams and no courses resolves to empty results
+        // rather than falling through to an unscoped query — an empty `.in()`
+        // list is not a valid filter, and "unscoped" is exactly the leak being
+        // closed here.
+        attemptsPromise = examIds.length > 0 ? (baseAttempts.in('exam_id', examIds) as any) : empty;
+        questionsPromise = courseCodes.length > 0 ? (baseQuestions.in('course_code', courseCodes) as any) : empty;
+      }
+
+      const [attemptsRes, questionsRes] = await Promise.all([attemptsPromise, questionsPromise]);
 
       const attempts = attemptsRes.data || [];
       const questions = questionsRes.data || [];

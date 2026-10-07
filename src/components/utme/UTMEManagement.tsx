@@ -97,7 +97,39 @@ export default function UTMEManagement() {
 
   useEffect(() => {
     fetchData();
-  }, []);
+
+    if (!supabase) return;
+
+    /**
+     * Live question-bank updates.
+     *
+     * The bank is a shared, multi-editor surface — an import or an edit by
+     * another administrator currently only appears here on a manual refresh.
+     * These are exactly the tables `fetchData` reads, and nothing else changes
+     * what this screen renders: questions, their topics, and the subjects that
+     * group them.
+     *
+     * Reloads are coalesced, because a PDF import inserts hundreds of questions
+     * in a burst and one reload per row would thrash the table.
+     */
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReload = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void fetchData(); }, 600);
+    };
+
+    const channel = supabase
+      .channel(`utme_management_live_${profile?.id ?? 'anon'}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'utme_questions' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'utme_topics' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'utme_subjects' }, scheduleReload)
+      .subscribe();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      supabase.removeChannel(channel);
+    };
+  }, [profile?.id]);
 
   const fetchData = async () => {
     setLoading(true);

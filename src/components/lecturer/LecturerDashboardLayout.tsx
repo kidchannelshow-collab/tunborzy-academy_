@@ -7,19 +7,22 @@ interface LecturerDashboardLayoutProps {
   onLogout: () => void;
   currentView: string;
   onNavigate: (view: string) => void;
+  /** Portal-scoped view ids the lecturer may reach; forwarded to the sidebar. */
+  allowedViews?: string[];
 }
 
-export default function LecturerDashboardLayout({ children, onLogout, currentView, onNavigate }: LecturerDashboardLayoutProps) {
+export default function LecturerDashboardLayout({ children, onLogout, currentView, onNavigate, allowedViews }: LecturerDashboardLayoutProps) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   return (
     <div className="min-h-[100dvh] bg-[#020617] flex">
-      <LecturerSidebar 
-        isOpen={isSidebarOpen} 
-        setIsOpen={setIsSidebarOpen} 
-        onLogout={onLogout} 
+      <LecturerSidebar
+        isOpen={isSidebarOpen}
+        setIsOpen={setIsSidebarOpen}
+        onLogout={onLogout}
         currentView={currentView}
         onNavigate={onNavigate}
+        allowedViews={allowedViews}
       />
       
       <div className="flex-1 min-w-0 lg:pl-72 flex flex-col min-h-[100dvh]">

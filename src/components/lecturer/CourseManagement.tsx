@@ -6,6 +6,8 @@ import { useProfile } from '../../lib/useProfile';
 import LessonEditor from '../materials/LessonEditor';
 import BulkLessonModal from '../admin/BulkLessonModal';
 import ConfirmationModal from '../admin/ConfirmationModal';
+import { LECTURER_PORTALS, isLecturerPortal } from '../../lib/lecturerCourses';
+import MaterialUploadModal from '../materials/MaterialUploadModal';
 
 export default function CourseManagement() {
   const { profile } = useProfile();
@@ -20,6 +22,18 @@ export default function CourseManagement() {
   const [courses, setCourses] = useState<any[]>([]);
   const [materials, setMaterials] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  /**
+   * Course-scoped material upload, re-homed here when the separate "Material
+   * Center" view was removed from lecturer access. It uses the SAME
+   * `MaterialUploadModal` the Admin hierarchy uses, so there is still exactly one
+   * uploader implementation, and the course list it offers is this lecturer's own
+   * assignments — an unassigned course cannot be targeted.
+   */
+  const [uploadCourseId, setUploadCourseId] = useState('');
+  const [uploadTopic, setUploadTopic] = useState('');
+  const [showUpload, setShowUpload] = useState(false);
+  const uploadCourse = courses.find((c: any) => c.id === uploadCourseId) || null;
 
   // Virtual Custom State (for empty topics not yet in DB)
   const [customTopics, setCustomTopics] = useState<{course_code: string, name: string}[]>([]);
@@ -49,7 +63,10 @@ export default function CourseManagement() {
   const thumbnailInputRef = useRef<HTMLInputElement>(null);
   const coverInputRef = useRef<HTMLInputElement>(null);
   const [courseForm, setCourseForm] = useState({
-    title: '', course_code: '', description: '', portal: 'Undergraduate', department: '', faculty: '', level: '', semester: 'First Semester', thumbnail_url: '', cover_image_url: ''
+    // `as string`: without the widening the object literal infers `portal` as the
+    // single literal type 'UTME' (LECTURER_PORTALS[0]), so the select's onChange
+    // — which yields a plain string — no longer type-checks.
+    title: '', course_code: '', description: '', portal: LECTURER_PORTALS[0] as string, department: '', faculty: '', level: '', semester: 'First Semester', thumbnail_url: '', cover_image_url: ''
   });
 
   // Lesson Editor State
@@ -381,10 +398,16 @@ export default function CourseManagement() {
                     </div>
                     <div className="space-y-2">
                       <label className="text-sm font-bold text-slate-300">Portal *</label>
+                      {/*
+                        Only the portals a lecturer may hold. Undergraduate was
+                        listed here, which let a lecturer create an Undergraduate
+                        course and then see it in their own list — the one portal
+                        the lecturer access model deliberately excludes.
+                      */}
                       <select required value={courseForm.portal} onChange={e => setCourseForm({...courseForm, portal: e.target.value})} className="w-full bg-[#020617] border border-slate-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-amber-500">
-                        <option value="Undergraduate">Undergraduate</option>
-                        <option value="UTME">UTME</option>
-                        <option value="Post-UTME">Post-UTME</option>
+                        {LECTURER_PORTALS.map((portal) => (
+                          <option key={portal} value={portal}>{portal}</option>
+                        ))}
                       </select>
                     </div>
                     <div className="space-y-2 md:col-span-2">
@@ -412,7 +435,55 @@ export default function CourseManagement() {
           </h1>
           <p className="text-sm font-body text-slate-400">Hierarchical course curriculum and materials management.</p>
         </div>
+
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <select
+            value={uploadCourseId}
+            onChange={(e) => setUploadCourseId(e.target.value)}
+            disabled={courses.length === 0}
+            className="bg-[#020617] border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 disabled:opacity-50"
+          >
+            <option value="">{courses.length === 0 ? 'No courses assigned' : 'Select a course…'}</option>
+            {courses.map((course: any) => (
+              <option key={course.id} value={course.id}>
+                {course.course_code} — {course.title} ({course.portal})
+              </option>
+            ))}
+          </select>
+
+          <input
+            type="text"
+            value={uploadTopic}
+            onChange={(e) => setUploadTopic(e.target.value)}
+            placeholder="Topic (optional)"
+            className="bg-[#020617] border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500"
+          />
+
+          <button
+            onClick={() => setShowUpload(true)}
+            disabled={!uploadCourse}
+            className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+          >
+            Upload Material
+          </button>
+        </div>
       </div>
+
+      {showUpload && uploadCourse && isLecturerPortal(uploadCourse.portal) && (
+        <MaterialUploadModal
+          programme={uploadCourse.portal}
+          semester={uploadCourse.semester ?? null}
+          courseCode={uploadCourse.course_code}
+          courseTitle={uploadCourse.title}
+          topic={uploadTopic.trim() || 'General'}
+          onClose={() => setShowUpload(false)}
+          onSaved={() => {
+            setShowUpload(false);
+            setUploadTopic('');
+            fetchData();
+          }}
+        />
+      )}
 
       <div className="bg-[#0f172a]/80 backdrop-blur-md border border-slate-800 rounded-3xl p-6 min-h-[500px] flex flex-col">
         {/* Breadcrumbs */}
