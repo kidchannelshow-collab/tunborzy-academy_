@@ -32,7 +32,17 @@ export interface ExtractedQuestion {
   /** 1-based line index the question started at, for "source location". */
   page_number: number | null;
   needs_review: boolean;
-  answer_source: 'answer_key' | 'none';
+  /**
+   * Where the answer came from, so a reviewer can tell a printed key from a
+   * model's judgement.
+   *
+   * `answer_key` — read from the document's own answer section.
+   * `none`       — no answer; the question is for a human to key.
+   * `deepseek-inferred` — the parser found none, so the model chose from the
+   *                       extracted options. Set downstream by the answer
+   *                       fallback in server.ts; this module never produces it.
+   */
+  answer_source: 'answer_key' | 'none' | 'deepseek-inferred';
   source: 'local';
 }
 

@@ -20,6 +20,7 @@ const require = createRequire(typeof __filename !== 'undefined' ? __filename : (
 import { extractQuestionsFromText } from './server/pdfQuestionExtractor.js';
 import {
   generateExplanations,
+  inferMissingAnswers,
   resolveExplanationEngine,
   DEFAULT_EXPLANATION_BATCH_SIZE,
 } from './server/explanationGenerator.js';
@@ -323,23 +324,31 @@ ${(content || '').substring(0, 10000)}`;
 
         // A malformed reply must not abort the write: the summary is prepended to
         // the indexed content, and an empty one simply means context is not added.
-        let result: { summary?: string; keywords?: string } = { summary: '', keywords: '' };
+        let result: { summary?: string; keywords?: string | string[] } = { summary: '', keywords: '' };
         try {
           result = raw ? JSON.parse(raw) : result;
         } catch {
           console.warn(`[AI Indexing Pipeline] Unparsable JSON for lesson ${lessonId}; indexing without a summary.`);
         }
-        
+
         // 4. Update the search index automatically
         // Prepend the summary to the cleaned text for context
         const finalContent = result.summary
           ? `[AI Summary: ${result.summary}]\n\n${cleanedText}`
           : cleanedText;
 
+        // The prompt asks for a comma-separated string, but the model returns a
+        // JSON array often enough that it cannot be assumed away. `keywords` is a
+        // text column, so normalise either shape here rather than letting an
+        // array reach Postgres.
+        const keywords = Array.isArray(result.keywords)
+          ? result.keywords.join(', ')
+          : String(result.keywords ?? '');
+
         const { error } = await supabase.from('lesson_ai_index')
           .update({
             content: finalContent,
-            keywords: result.keywords ?? ''
+            keywords
           })
           .eq('lesson_id', lessonId);
           
@@ -505,11 +514,76 @@ ${(content || '').substring(0, 10000)}`;
             page_number: q.page_number,
           }));
 
+          // ---- ANSWER FALLBACK STAGE ---------------------------------------
+          // The parser keys a question only when the document makes the answer
+          // unambiguous. Anything it could not key arrives here with
+          // `correct_option: null`, and until now nothing ever tried to fill it
+          // in: the admin had to answer each one by hand, and because the
+          // explanation stage skips unkeyed questions they also got no
+          // explanation. This asks the model to CHOOSE from the options the
+          // parser already extracted — it never invents a question or rewrites
+          // an option, and a question it cannot key is left exactly as found.
+          //
+          // Runs BEFORE the explanation stage, and before `explainable` is
+          // counted, so a question keyed here also gets its explanation in the
+          // same import rather than needing a second pass.
+          //
+          // Strictly additive and best-effort: any failure leaves the import
+          // byte-identical to what the parser alone would have produced.
+          try {
+            const answerless = shaped
+              .map((q, index) => ({ q, index }))
+              // Two options are the minimum a choice can be made from; with one
+              // or none there is nothing to choose, so it stays for a human.
+              .filter(({ q }) => !q.correct_option && q.option_a && q.option_b);
+
+            if (answerless.length === 0) {
+              console.log('[PDF Import] every extracted question already has an answer — no inference needed.');
+            } else if (!getDeepSeekApiKey()) {
+              console.log('[PDF Import] answer inference skipped: DEEPSEEK_API_KEY is not set.');
+            } else {
+              console.log(`[PDF Import] ${answerless.length} question(s) have no answer key — asking DeepSeek to key them.`);
+              const inferred = await inferMissingAnswers(
+                answerless.map(({ q }) => ({
+                  question_text: q.question_text,
+                  option_a: q.option_a,
+                  option_b: q.option_b,
+                  option_c: q.option_c,
+                  option_d: q.option_d,
+                })),
+                { batchSize: EXPLANATION_BATCH_SIZE, onProgress: (m) => console.log(`[PDF Import] ${m}`) },
+              );
+
+              inferred.answers.forEach((answer) => {
+                if (!answer.correct_option) return;
+                const target = shaped[answerless[answer.index]?.index];
+                if (!target) return;
+                target.correct_option = answer.correct_option;
+                // Keyed by inference, so it is publishable and explainable — but
+                // the provenance is recorded so a reviewer knows this answer was
+                // chosen by a model rather than read from the document.
+                target.answer_source = 'deepseek-inferred';
+                target.needs_review = false;
+                target.approved = true;
+              });
+
+              console.log(
+                `[PDF Import] answer inference: ${inferred.stats.inferred} keyed, ` +
+                `${inferred.stats.declined} left for manual review` +
+                (inferred.stats.stopReason ? ` (${inferred.stats.stopReason})` : '') + '.',
+              );
+            }
+          } catch (err: any) {
+            // Never fatal: the questions are already extracted and saveable.
+            console.warn('[PDF Import] answer inference failed, questions kept unkeyed:', err?.message || err);
+          }
+
           // ---- OPTIONAL EXPLANATION STAGE ----------------------------------
-          // Runs strictly AFTER extraction, and only for questions that already
-          // have a known answer. It is additive: every branch below ends with the
-          // same questions returned, so an AI outage degrades explanation quality
-          // and nothing else — explanations are never a prerequisite for saving.
+          // Runs strictly AFTER extraction and after the answer fallback above,
+          // and only for questions that have a known answer by this point. It is
+          // additive: every branch below ends with the same questions returned,
+          // so an AI outage degrades explanation quality and nothing else —
+          // explanations are never a prerequisite for saving.
           const wantsExplanations =
             String(req.body?.generateExplanations ?? 'true').toLowerCase() !== 'false';
           const explainable = shaped.filter((q) => q.correct_option).length;
@@ -696,6 +770,7 @@ ${(content || '').substring(0, 10000)}`;
                 // to this key) is deliberately NOT here: retrying it just burns
                 // time and still fails.
                 const retryable =
+                  chunkErr?.retryable === true ||
                   status === 429 || status === 503 || status === 500 ||
                   errMessage.includes('429') || errMessage.includes('resource_exhausted') ||
                   errMessage.includes('503') || errMessage.includes('unavailable') ||
