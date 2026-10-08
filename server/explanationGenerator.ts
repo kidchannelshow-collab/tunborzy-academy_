@@ -8,7 +8,7 @@
  *   part of the import that still needs a model.
  *
  * WHY IT IS BATCHED
- *   The importer previously sent one Gemini request per chunk of raw PDF text —
+ *   The importer previously sent one request per chunk of raw PDF text —
  *   and, before the local-first parser, effectively per question — which is what
  *   exhausted the quota. Explanations are cheap in tokens and independent of one
  *   another, so many questions travel in ONE request. Requests drop from roughly
@@ -33,14 +33,14 @@
  *
  * LOCAL AI
  *   The engine is pluggable. A local Ollama server (plain HTTP, no Python, no
- *   sidecar process to manage) is PREFERRED when one is running; Gemini is the
+ *   sidecar process to manage) is PREFERRED when one is running; DeepSeek is the
  *   fallback. Both are driven through the same batched prompt and the same JSON
  *   schema, so the explanation quality and the id-mapping behave identically
  *   whichever engine answers. Selecting the engine is `resolveExplanationEngine`;
  *   it reports exactly which model ran, so a log can never misattribute a run.
  */
 
-import { GoogleGenAI, Type } from '@google/genai';
+import { deepseekComplete, deepseekModel, getDeepSeekApiKey } from './deepseekClient.js';
 
 export interface ExplanationQuestion {
   question_text: string;
@@ -86,7 +86,7 @@ export interface ExplanationRunResult {
  * retries and containment are written once rather than per provider.
  */
 export interface ExplanationEngine {
-  /** 'ollama' or 'gemini' — recorded so logs never misattribute a run. */
+  /** 'ollama' or 'deepseek' — recorded so logs never misattribute a run. */
   readonly provider: string;
   readonly model: string;
   /** Send one batched prompt; resolve with the raw JSON string, or throw. */
@@ -139,8 +139,9 @@ export function createOllamaEngine(baseUrl: string, model: string): ExplanationE
         body: JSON.stringify({
           model,
           stream: false,
-          // Structured output: the SAME schema Gemini is given, so every object
-          // comes back with the id we sent and maps to its question unambiguously.
+          // Structured output: Ollama enforces the schema outright, which the
+          // hosted engine can only be instructed to follow. Either way every
+          // object comes back with the id we sent and maps to its question.
           format: EXPLANATION_SCHEMA,
           options: { temperature: 0.2 },
           messages: [{ role: 'user', content: prompt }],
@@ -162,22 +163,31 @@ export function createOllamaEngine(baseUrl: string, model: string): ExplanationE
   };
 }
 
-export function createGeminiEngine(apiKey: string, model: string): ExplanationEngine {
-  const ai = new GoogleGenAI({ apiKey });
+/**
+ * The hosted DeepSeek engine.
+ *
+ * The schema cannot be enforced by the provider — DeepSeek's JSON mode takes no
+ * schema, unlike the `responseSchema` this replaced — so `EXPLANATION_SCHEMA` is
+ * rendered into the prompt as an instruction instead. The batch prompt must
+ * therefore carry it; see `buildBatchPrompt`. What the provider guarantees is
+ * that the reply is valid JSON, and every object is matched back to its question
+ * by the `id` we sent, so a missing or malformed entry fails one question rather
+ * than the batch.
+ *
+ * `apiKey` is accepted for symmetry with the Ollama engine and to keep the
+ * resolver's shape unchanged; the client reads it from the environment itself.
+ */
+export function createDeepSeekEngine(apiKey: string, model: string): ExplanationEngine {
   return {
-    provider: 'gemini',
+    provider: 'deepseek',
     model,
     async complete(prompt: string) {
-      const response = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: EXPLANATION_SCHEMA as any,
-          temperature: 0.2,
-        },
+      void apiKey;
+      return deepseekComplete({
+        prompt: `${prompt}\n\nRespond with JSON matching this schema:\n${JSON.stringify(EXPLANATION_SCHEMA)}`,
+        json: true,
+        temperature: 0.2,
       });
-      return response.text ? response.text.trim() : '';
     },
   };
 }
@@ -193,9 +203,12 @@ export interface ResolvedEngine {
  * Choose the explanation engine.
  *
  * `EXPLANATION_PROVIDER`:
- *   auto (default) — prefer a RUNNING local model, else Gemini.
+ *   auto (default) — prefer a RUNNING local model, else DeepSeek.
  *   ollama         — local only; if it is down, explanations are flagged for review.
- *   gemini         — force the hosted model (opt out of local inference).
+ *   deepseek       — force the hosted model (opt out of local inference).
+ *   gemini         — accepted as a legacy alias for `deepseek`, so a deployment
+ *                    still setting the old value keeps working instead of
+ *                    silently falling through to "no engine".
  *
  * Resolution never throws and never silently substitutes one provider for
  * another mid-run: whichever engine is returned is the engine whose name is
@@ -206,9 +219,8 @@ export async function resolveExplanationEngine(): Promise<ResolvedEngine> {
   const choice = (process.env.EXPLANATION_PROVIDER || 'auto').toLowerCase();
   const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL;
   const ollamaModel = (process.env.OLLAMA_MODEL || '').trim();
-  const geminiKey = process.env.GEMINI_API_KEY || '';
-  const geminiModel =
-    process.env.GEMINI_EXPLANATION_MODEL || process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+  const deepseekKey = getDeepSeekApiKey() || '';
+  const deepseekModelId = deepseekModel();
 
   if (choice === 'ollama' || choice === 'auto') {
     const localModels = await listOllamaModels(ollamaBaseUrl);
@@ -231,16 +243,16 @@ export async function resolveExplanationEngine(): Promise<ResolvedEngine> {
     }
   }
 
-  if (geminiKey) {
+  if (deepseekKey) {
     return {
-      engine: createGeminiEngine(geminiKey, geminiModel),
-      reason: `hosted Gemini (model ${geminiModel})`,
+      engine: createDeepSeekEngine(deepseekKey, deepseekModelId),
+      reason: `hosted DeepSeek (model ${deepseekModelId})`,
     };
   }
 
   return {
     engine: null,
-    reason: 'no local model is running and GEMINI_API_KEY is not set',
+    reason: 'no local model is running and DEEPSEEK_API_KEY is not set',
   };
 }
 
@@ -268,27 +280,42 @@ const CONSECUTIVE_QUOTA_FAILURES_BEFORE_STOP = 2;
 /** Explanations longer than this are truncated — the field is a teaching aid, not an essay. */
 const MAX_EXPLANATION_CHARS = 1200;
 
+/**
+ * The shape every engine is asked to return.
+ *
+ * Plain JSON Schema, as a literal. It used to be built from the removed
+ * provider's `Type` enum, which made it provider-specific; this form is consumed
+ * two ways and must stay neutral between them:
+ *
+ *   - Ollama is handed it as `format` and enforces it outright.
+ *   - The hosted engine is only INSTRUCTED with it, because DeepSeek's JSON mode
+ *     accepts no schema. `createDeepSeekEngine` serialises it into the prompt.
+ *
+ * `required` is advisory for the hosted engine and binding for Ollama, so the
+ * parser treats a missing field as a per-question failure either way rather than
+ * trusting that the key is present.
+ */
 const EXPLANATION_SCHEMA = {
-  type: Type.ARRAY,
+  type: 'array',
   items: {
-    type: Type.OBJECT,
+    type: 'object',
     properties: {
       id: {
-        type: Type.STRING,
+        type: 'string',
         description: 'The exact id label given for the question, e.g. "Q3".',
       },
       explanation: {
-        type: Type.STRING,
+        type: 'string',
         description:
           'The educational explanation of how the keyed answer is obtained. Empty string when can_explain is false.',
       },
       can_explain: {
-        type: Type.BOOLEAN,
+        type: 'boolean',
         description:
           'True only when the question contains enough information to justify the keyed answer.',
       },
       review_note: {
-        type: Type.STRING,
+        type: 'string',
         description:
           'When can_explain is false, one short line saying what is missing or ambiguous. Otherwise empty.',
       },

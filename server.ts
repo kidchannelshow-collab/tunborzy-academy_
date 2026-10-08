@@ -9,7 +9,6 @@ import path from 'path';
 // local dev server (see startServer below) and is loaded there with a dynamic
 // import. A static import would pull the whole Vite toolchain into the deployed
 // serverless function, which never serves the SPA — Vercel does that.
-import { GoogleGenAI, Type, Schema } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
 import multer from 'multer';
 import { createRequire } from 'module';
@@ -24,6 +23,13 @@ import {
   resolveExplanationEngine,
   DEFAULT_EXPLANATION_BATCH_SIZE,
 } from './server/explanationGenerator.js';
+import {
+  deepseekComplete,
+  deepseekStream,
+  deepseekModel,
+  getDeepSeekApiKey,
+  DEFAULT_DEEPSEEK_MODEL,
+} from './server/deepseekClient.js';
 
 // Load Supabase configuration with safe fallbacks
 const supabaseUrl = process.env.VITE_SUPABASE_URL || 'https://placeholder.supabase.co';
@@ -105,7 +111,7 @@ async function readCbtSettings(sb: ReturnType<typeof createSupabaseClient>) {
  * used was not knowable from the code. It is exported on /api/health so the
  * RUNNING process can be checked, not just the source file.
  */
-const PDF_IMPORT_MODEL = 'gemini-3.6-flash';
+const PDF_IMPORT_MODEL = deepseekModel();
 
 /**
  * The HOSTED model used for the OPTIONAL explanation stage of the PDF importer,
@@ -113,14 +119,12 @@ const PDF_IMPORT_MODEL = 'gemini-3.6-flash';
  *
  * The explanation stage is local-first: `resolveExplanationEngine` prefers a
  * running Ollama server (plain HTTP from Node — no Python, no sidecar) and only
- * falls back to Gemini when there is no local model. This name is therefore the
- * fallback, not the default path. It stays env-configurable because the model
- * that explains questions is a separate operational decision from the model that
- * parses a document. `GEMINI_EXPLANATION_MODEL` wins; `GEMINI_MODEL` is honoured
- * as a general fallback; otherwise the importer's model is used.
+ * falls back to DeepSeek when there is no local model. This name is therefore the
+ * fallback, not the default path. It resolves through the same `deepseekModel()`
+ * as the importer, so the two can never disagree about which model is in use —
+ * they differ only in the prompts they send. Set `DEEPSEEK_MODEL` to change both.
  */
-const EXPLANATION_MODEL =
-  process.env.GEMINI_EXPLANATION_MODEL || process.env.GEMINI_MODEL || PDF_IMPORT_MODEL;
+const EXPLANATION_MODEL = deepseekModel();
 
 /** Ollama endpoint, reported on /api/health so the configured target is visible. */
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
@@ -135,7 +139,7 @@ const EXPLANATION_PROVIDER = (process.env.EXPLANATION_PROVIDER || 'auto').toLowe
  * tune the requests-vs-latency trade-off without a rebuild.
  */
 const EXPLANATION_BATCH_SIZE = (() => {
-  const parsed = Number.parseInt(process.env.GEMINI_EXPLANATION_BATCH_SIZE || '', 10);
+  const parsed = Number.parseInt(process.env.DEEPSEEK_EXPLANATION_BATCH_SIZE || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_EXPLANATION_BATCH_SIZE;
 })();
 
@@ -145,9 +149,9 @@ console.log(`PDF import model: ${PDF_IMPORT_MODEL}`);
 console.log(
   `PDF explanation: provider=${EXPLANATION_PROVIDER} ` +
   `ollama=${OLLAMA_BASE_URL}${process.env.OLLAMA_MODEL ? ` model=${process.env.OLLAMA_MODEL}` : ''} ` +
-  `geminiFallback=${EXPLANATION_MODEL} (batch size ${EXPLANATION_BATCH_SIZE})`,
+  `deepseekFallback=${EXPLANATION_MODEL} (batch size ${EXPLANATION_BATCH_SIZE})`,
 );
-for (const key of ['VITE_SUPABASE_URL', 'VITE_SUPABASE_PUBLISHABLE_KEY', 'VITE_SUPABASE_ANON_KEY', 'GEMINI_API_KEY']) {
+for (const key of ['VITE_SUPABASE_URL', 'VITE_SUPABASE_PUBLISHABLE_KEY', 'VITE_SUPABASE_ANON_KEY', 'DEEPSEEK_API_KEY']) {
   const value = process.env[key] ?? '';
   console.log(`${key}: present=${value.length > 0 ? 'yes' : 'no'} length=${value.length}`);
 }
@@ -190,13 +194,13 @@ function createApp() {
       ok: true,
       server: 'backend',
       // Proves which model THIS process will use for PDF import. If this does
-      // not read 'gemini-2.5-flash', the running server predates the source and
+      // not match the configured model, the running server predates the source
       // needs restarting — `npm run dev` runs tsx with no hot reload.
       pdfImportModel: PDF_IMPORT_MODEL,
       // The explanation stage's configuration, so the RUNNING process can be
       // checked without reading the source (same reason as pdfImportModel).
       // `explanationProvider: 'auto'` means local-first: a running Ollama wins,
-      // Gemini is only the fallback.
+      // DeepSeek is only the fallback.
       explanationProvider: EXPLANATION_PROVIDER,
       ollamaBaseUrl: OLLAMA_BASE_URL,
       ollamaModel: process.env.OLLAMA_MODEL || null,
@@ -210,12 +214,10 @@ function createApp() {
   app.post('/api/categorize-files', async (req, res) => {
     try {
       const { files, portal } = req.body; // files: { id, name, url }[]
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        return res.status(500).json({ error: 'GEMINI_API_KEY is not set' });
+      if (!getDeepSeekApiKey()) {
+        return res.status(500).json({ error: 'DEEPSEEK_API_KEY is not set' });
       }
 
-      const ai = new GoogleGenAI({ apiKey });
       const prompt = `Categorize the following files for an educational platform (Portal: ${portal}).
       
 For each file, determine:
@@ -229,35 +231,34 @@ Files:
 ${files.map((f: any) => `- ${f.name}`).join('\n')}
 `;
 
-      const schema = {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            name: { type: Type.STRING },
-            subject: { type: Type.STRING },
-            course_code: { type: Type.STRING },
-            semester: { type: Type.STRING },
-            portal: { type: Type.STRING },
-            file_type: { type: Type.STRING },
-            topic: { type: Type.STRING },
-            is_past_question: { type: Type.BOOLEAN },
+      // The provider no longer enforces a schema, so the shape travels in the
+      // prompt. `files` is requested as an OBJECT property rather than a bare
+      // array because JSON mode is specified to return an object; the unwrap
+      // below still accepts a bare array, so a model that ignores the wrapper
+      // does not break the endpoint.
+      const shape = {
+        files: [
+          {
+            name: 'file name, echoed back exactly',
+            subject: 'e.g. Mathematics, Physics, English, Chemistry',
+            course_code: 'course code if discernible, else empty string',
+            semester: 'semester if discernible, else empty string',
+            portal: 'the portal given above',
+            file_type: "one of: video, pdf, past_question, assignment, image, doc, ppt, zip, link",
+            topic: 'topic if discernible, else General',
+            is_past_question: true,
           },
-          required: ["name", "subject", "file_type", "topic", "is_past_question"]
-        }
+        ],
       };
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: schema,
-          temperature: 0.1
-        }
+      const raw = await deepseekComplete({
+        prompt: `${prompt}\n\nReturn JSON with exactly this shape:\n${JSON.stringify(shape)}\n\nOne entry in "files" for every file listed above, in the same order.`,
+        json: true,
+        temperature: 0.1,
       });
 
-      const result = JSON.parse(response.text || '[]');
+      const parsed = JSON.parse(raw || '{}');
+      const result = Array.isArray(parsed) ? parsed : (parsed.files ?? parsed.items ?? []);
       res.json(result);
     } catch (err: any) {
       console.error(err);
@@ -268,11 +269,9 @@ ${files.map((f: any) => `- ${f.name}`).join('\n')}
   app.post('/api/summarize-lesson', async (req, res) => {
     try {
       const { title, content } = req.body;
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        return res.status(500).json({ error: 'GEMINI_API_KEY is not set' });
+      if (!getDeepSeekApiKey()) {
+        return res.status(500).json({ error: 'DEEPSEEK_API_KEY is not set' });
       }
-      const ai = new GoogleGenAI({ apiKey });
       const prompt = `Generate a concise, high-yield revision summary of the academic material titled "${title || 'Untitled'}".
       
 Requirements:
@@ -285,15 +284,8 @@ Requirements:
 Material Content:
 ${(content || '').substring(0, 10000)}`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
-        contents: prompt,
-        config: {
-          temperature: 0.2
-        }
-      });
-
-      res.json({ summary: response.text || 'No summary generated.' });
+      const summary = await deepseekComplete({ prompt, temperature: 0.2 });
+      res.json({ summary: summary || 'No summary generated.' });
     } catch (err: any) {
       console.error('Summarize lesson error:', err);
       res.status(500).json({ error: err.message });
@@ -317,41 +309,37 @@ ${(content || '').substring(0, 10000)}`;
         // 2. Remove duplicate spaces
         const cleanedText = noHtml.replace(/\s+/g, ' ').trim();
         
-        // 3. Extract keywords & Summary with Gemini
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) throw new Error('GEMINI_API_KEY is not configured.');
-        
-        const ai = new GoogleGenAI({ apiKey });
-        
-        const schema = {
-          type: Type.OBJECT,
-          properties: {
-            summary: { type: Type.STRING, description: "A short 2-sentence summary of the lesson." },
-            keywords: { type: Type.STRING, description: "A string of 5-7 comma-separated keywords extracted from the text." }
-          },
-          required: ["summary", "keywords"]
-        };
-        
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.6-flash',
-          contents: `Analyze this lesson content.\nTitle: "${title || 'Untitled'}"\nContent: "${cleanedText.substring(0, 5000)}"\nExtract keywords and generate a short AI summary.`,
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: schema as Schema,
-            temperature: 0.2
-          }
+        // 3. Extract keywords & summary with DeepSeek
+        if (!getDeepSeekApiKey()) throw new Error('DEEPSEEK_API_KEY is not configured.');
+
+        const raw = await deepseekComplete({
+          prompt:
+            `Analyze this lesson content.\nTitle: "${title || 'Untitled'}"\nContent: "${cleanedText.substring(0, 5000)}"\n` +
+            `Extract keywords and generate a short AI summary.\n\n` +
+            `Return JSON shaped exactly like:\n{"summary":"a short 2-sentence summary of the lesson","keywords":"5-7 comma-separated keywords from the text"}`,
+          json: true,
+          temperature: 0.2,
         });
-        
-        const result = response.text ? JSON.parse(response.text) : { summary: '', keywords: '' };
+
+        // A malformed reply must not abort the write: the summary is prepended to
+        // the indexed content, and an empty one simply means context is not added.
+        let result: { summary?: string; keywords?: string } = { summary: '', keywords: '' };
+        try {
+          result = raw ? JSON.parse(raw) : result;
+        } catch {
+          console.warn(`[AI Indexing Pipeline] Unparsable JSON for lesson ${lessonId}; indexing without a summary.`);
+        }
         
         // 4. Update the search index automatically
         // Prepend the summary to the cleaned text for context
-        const finalContent = `[AI Summary: ${result.summary}]\n\n${cleanedText}`;
-        
+        const finalContent = result.summary
+          ? `[AI Summary: ${result.summary}]\n\n${cleanedText}`
+          : cleanedText;
+
         const { error } = await supabase.from('lesson_ai_index')
-          .update({ 
-            content: finalContent, 
-            keywords: result.keywords 
+          .update({
+            content: finalContent,
+            keywords: result.keywords ?? ''
           })
           .eq('lesson_id', lessonId);
           
@@ -462,7 +450,7 @@ ${(content || '').substring(0, 10000)}`;
         // ---- LOCAL-FIRST EXTRACTION ---------------------------------------
         // Question boundaries are a deterministic text pattern, not a semantic
         // problem, so parse them locally BEFORE spending any AI quota. If this
-        // yields questions we return immediately and Gemini is never called.
+        // yields questions we return immediately and the model is never called.
         // The AI path below is unchanged and still runs for any PDF this cannot
         // parse, so this can only reduce API usage — never remove a capability.
         const localResult = extractQuestionsFromText(pdfText);
@@ -610,12 +598,9 @@ ${(content || '').substring(0, 10000)}`;
         }
         // ---- END LOCAL-FIRST -----------------------------------------------
 
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-          return res.status(500).json({ error: 'GEMINI_API_KEY is not configured.' });
+        if (!getDeepSeekApiKey()) {
+          return res.status(500).json({ error: 'DEEPSEEK_API_KEY is not configured.' });
         }
-
-        const ai = new GoogleGenAI({ apiKey });
 
         const CHUNK_SIZE = 12000;
         const chunks: string[] = [];
@@ -639,49 +624,65 @@ ${(content || '').substring(0, 10000)}`;
         const chunkFailures: { chunk: number; total: number; reason: string; retryable: boolean }[] = [];
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
+          // The wrapper object exists because the provider's JSON mode is
+          // specified to return an OBJECT. The unwrap below still accepts a bare
+          // array, so a model that returns one is handled rather than failing the
+          // chunk. `explanation` is required here, not optional: this importer is
+          // what produces a question's first explanation, and an omitted field
+          // would silently ship questions with none.
           const prompt = `
             You are an expert examination question generator. Analyze section ${i + 1} of ${chunks.length} from the study material or past question text and extract ALL multiple-choice questions (MCQs) present.
-            Return ONLY a valid JSON array of objects. Do not include markdown ticks like \`\`\`json.
-            Each object must have this exact structure:
+            Return JSON shaped exactly like:
             {
-              "question_text": "The clear question statement?",
-              "option_a": "Option A text",
-              "option_b": "Option B text",
-              "option_c": "Option C text",
-              "option_d": "Option D text",
-              "correct_option": "A",
-              "explanation": "Brief explanation why the option is correct."
+              "questions": [
+                {
+                  "question_text": "The clear question statement?",
+                  "option_a": "Option A text",
+                  "option_b": "Option B text",
+                  "option_c": "Option C text",
+                  "option_d": "Option D text",
+                  "correct_option": "A",
+                  "explanation": "Brief explanation why the option is correct."
+                }
+              ]
             }
+            Include one entry per question found in this section. If the section contains no questions, return {"questions": []}.
 
             Text section to analyze:
             ${chunk}
           `;
 
           let success = false;
-          // Single entry, from the single source of truth. Never add a fallback
-          // model: switching models silently mid-import is the bug this replaced.
-          const modelsToTry = [PDF_IMPORT_MODEL];
-          console.log(`[PDF Import] Extracting with model: ${modelsToTry[0]}`);
+          // The single source of truth. Never add a fallback model: switching
+          // models silently mid-import is the bug this replaced. The client
+          // resolves this itself, so it is logged once per chunk rather than
+          // threaded through the loop.
+          console.log(`[PDF Import] Extracting with model: ${PDF_IMPORT_MODEL}`);
 
           // Sequential, not parallel: this loop already awaits one chunk before
           // starting the next, so a large PDF cannot open a burst of concurrent
-          // Gemini requests and trip the rate limiter.
+          // provider requests and trip the rate limiter.
           const MAX_ATTEMPTS = 4;
 
-          for (const model of modelsToTry) {
-            if (success) break;
+          {
             for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
               try {
-                const response = await ai.models.generateContent({
-                  model,
-                  contents: prompt,
+                const rawResponseText = await deepseekComplete({
+                  prompt,
+                  json: true,
+                  // Extraction is a faithful-copy task: a creative temperature
+                  // invites the model to paraphrase a question stem or, worse,
+                  // rewrite an option.
+                  temperature: 0,
                 });
 
-                const rawResponseText = response.text ? response.text.trim() : '';
                 const cleanedJson = rawResponseText.replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
-                const parsedArray = JSON.parse(cleanedJson);
+                const parsed = JSON.parse(cleanedJson);
+
+                // Accept either the requested wrapper or a bare array.
+                const parsedArray = Array.isArray(parsed) ? parsed : parsed?.questions;
                 if (!Array.isArray(parsedArray)) {
-                  throw new Error('Model returned valid JSON that was not an array of questions.');
+                  throw new Error('Model returned valid JSON that contained no array of questions.');
                 }
                 allQuestions.push(...parsedArray);
                 success = true;
@@ -699,7 +700,8 @@ ${(content || '').substring(0, 10000)}`;
                   errMessage.includes('429') || errMessage.includes('resource_exhausted') ||
                   errMessage.includes('503') || errMessage.includes('unavailable') ||
                   errMessage.includes('overloaded') || errMessage.includes('timeout') ||
-                  errMessage.includes('econnreset') || errMessage.includes('fetch failed');
+                  errMessage.includes('econnreset') || errMessage.includes('fetch failed') ||
+                  errMessage.includes('rate limit') || errMessage.includes('too many requests');
 
                 if (retryable && attempt < MAX_ATTEMPTS) {
                   // Exponential backoff with jitter: ~2s, ~4s, ~8s.
@@ -740,14 +742,14 @@ ${(content || '').substring(0, 10000)}`;
             const first = chunkFailures[0];
             return res.status(502).json({
               error:
-                `Gemini extraction failed on chunk ${first.chunk} of ${first.total}: ${first.reason}` +
+                `DeepSeek extraction failed on chunk ${first.chunk} of ${first.total}: ${first.reason}` +
                 (chunkFailures.length > 1 ? ` (and ${chunkFailures.length - 1} other chunk(s))` : ''),
-              code: 'GEMINI_EXTRACTION_FAILED',
+              code: 'DEEPSEEK_EXTRACTION_FAILED',
               model: PDF_IMPORT_MODEL,
               failedChunks: chunkFailures,
             });
           }
-          return res.status(400).json({ error: 'Gemini could not identify any valid questions in the uploaded document. Please check the PDF content.' });
+          return res.status(400).json({ error: 'DeepSeek could not identify any valid questions in the uploaded document. Please check the PDF content.' });
         }
 
         const seenTexts = new Set<string>();
@@ -856,12 +858,14 @@ ${(content || '').substring(0, 10000)}`;
     app.post('/api/chat', async (req, res) => {
     try {
       
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        return res.status(500).json({ error: 'GEMINI_API_KEY is not set' });
+      if (!getDeepSeekApiKey()) {
+        return res.status(500).json({ error: 'DEEPSEEK_API_KEY is not set' });
       }
-      
-      let systemPrompt = "You are TONBORZY AI Tutor, a helpful academic assistant for an educational platform. You help students with their studies, explain concepts step by step, and solve problems with worked solutions. Explain science, engineering, computing concepts, and university-level topics. Help students prepare for CBT examinations, generate quizzes when requested, summarize academic notes, simplify difficult concepts, and recommend study strategies. If course materials are provided, use them as the highest-priority knowledge source. Otherwise, use your general educational knowledge. Never return fake information. If the answer is uncertain, state that clearly instead of inventing facts. Encourage learning instead of cheating, explain answers instead of only giving results, use clear language, and maintain a professional tone. Never expose that you are Gemini, identify yourself only as TONBORZY AI Tutor. If you need more information, use Google Search.";
+
+      // The provider name is deliberately not in the prompt any more. The old one
+      // named a vendor the model could leak, and this one must never be revealed
+      // either; "never name your underlying model" covers both.
+      let systemPrompt = "You are TONBORZY AI Tutor, a helpful academic assistant for an educational platform. You help students with their studies, explain concepts step by step, and solve problems with worked solutions. Explain science, engineering, computing concepts, and university-level topics. Help students prepare for CBT examinations, generate quizzes when requested, summarize academic notes, simplify difficult concepts, and recommend study strategies. If course materials are provided, use them as the highest-priority knowledge source. Otherwise, use your general educational knowledge. Never return fake information. If the answer is uncertain, state that clearly instead of inventing facts. Encourage learning instead of cheating, explain answers instead of only giving results, use clear language, and maintain a professional tone. Never reveal which underlying model or vendor you are, identify yourself only as TONBORZY AI Tutor, and never claim to have searched the web or browsed the internet.";
       let personality = "Professional and encouraging";
       let teachingStyle = "Step-by-step guidance";
       let answerLength = "Detailed";
@@ -934,8 +938,6 @@ Instructions:
 - Answer Length: ${answerLength}
 - Language: ${language}`;
 
-      const ai = new GoogleGenAI({ apiKey });
-      
       const contents = messages.map((msg: any) => {
         const parts: any[] = [];
         if (msg.fileData) {
@@ -1001,24 +1003,50 @@ Instructions:
         console.error("Failed to load Academic Lessons:", err);
       }
 
-      const responseStream = await ai.models.generateContentStream({
+      /*
+       * THE TWO CAPABILITIES THE PREVIOUS PROVIDER HAD AND THIS ONE DOES NOT.
+       *
+       * 1. FILE ATTACHMENTS. The old model accepted an inline file payload per
+       *    message (a PDF or image the student attached) and could read it.
+       *    DeepSeek is text-only. Silently dropping the payload would answer a
+       *    question about a document the model never saw — a confident wrong
+       *    answer, which is worse than an error — so the request is refused with
+       *    a reason the UI can show. Re-enabling attachments means a
+       *    vision-capable provider, or extracting the file to text first.
+       *
+       * 2. WEB SEARCH. The old model had a built-in search tool. DeepSeek has no
+       *    browsing, so the tool declaration is gone. The system prompt no longer
+       *    invites the model to search, so it should not promise results it
+       *    cannot retrieve.
+       */
+      const hasAttachment = contents.some(
+        (c: any) => Array.isArray(c.parts) && c.parts.some((p: any) => p.inlineData),
+      );
+      if (hasAttachment) {
+        return res.status(400).json({
+          error:
+            'File attachments are not supported by the configured AI provider. ' +
+            'Remove the attachment, or paste the text you want explained.',
+        });
+      }
 
-        model: 'gemini-3.6-flash',
-        contents,
-        config: {
-          systemInstruction: combinedSystemInstruction,
-          tools: [{ googleSearch: {} }],
-        }
-      });
+      // Parts-based contents (built above, and rewritten by the RAG block) are
+      // flattened to plain chat turns here, at the single point of use, so the
+      // retrieval logic above did not have to be rewritten.
+      const chatMessages = [
+        { role: 'system' as const, content: combinedSystemInstruction },
+        ...contents.map((c: any) => ({
+          role: (c.role === 'model' ? 'assistant' : 'user') as 'assistant' | 'user',
+          content: (c.parts || []).map((p: any) => p.text || '').join('\n'),
+        })),
+      ];
 
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 
-      for await (const chunk of responseStream) {
-        if (chunk.text) {
-          res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
-        }
+      for await (const delta of deepseekStream({ messages: chatMessages, temperature: 0.7 })) {
+        res.write(`data: ${JSON.stringify({ text: delta })}\n\n`);
       }
       res.write('data: [DONE]\n\n');
       res.end();
@@ -2066,7 +2094,7 @@ Instructions:
   // System Health API (flat status shape)
   // admin/SystemSettings.tsx:131 calls /api/admin/system-health and reads
   // healthStatus.supabase_db / supabase_auth / supabase_storage /
-  // express_backend / gemini_ai / flutterwave, each either 'Connected' or
+  // express_backend / deepseek_ai / flutterwave, each either 'Connected' or
   // 'Configuration Missing'. Only the -extended variant existed, so the Health
   // tab in System Settings always reported "Failed to check system health".
   app.get('/api/admin/system-health', async (req, res) => {
@@ -2109,7 +2137,7 @@ Instructions:
         supabase_auth: authOk ? 'Connected' : 'Configuration Missing',
         supabase_storage: storageOk ? 'Connected' : 'Configuration Missing',
         express_backend: 'Connected',
-        gemini_ai: process.env.GEMINI_API_KEY ? 'Connected' : 'Configuration Missing',
+        deepseek_ai: getDeepSeekApiKey() ? 'Connected' : 'Configuration Missing',
         flutterwave: flw.secretKey ? 'Connected' : 'Configuration Missing'
       });
     } catch (err: any) {

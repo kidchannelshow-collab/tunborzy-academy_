@@ -2,7 +2,7 @@
  * Local-first question extraction for the UTME PDF importer.
  *
  * WHY THIS EXISTS
- *   The importer used to send every chunk of extracted PDF text to Gemini just
+ *   The importer used to send every chunk of extracted PDF text to the model just
  *   to find where questions and options begin and end. That is the single
  *   largest consumer of API quota, and it is unnecessary: question boundaries
  *   are a deterministic text pattern, not a semantic problem. This module does

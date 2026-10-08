@@ -434,7 +434,7 @@ export default function SystemSettings() {
                       { name: 'Supabase Authentication', status: healthStatus.supabase_auth, icon: Key },
                       { name: 'Supabase Storage', status: healthStatus.supabase_storage, icon: HardDrive },
                       { name: 'Express Backend', status: healthStatus.express_backend, icon: Cpu },
-                      { name: 'Gemini AI API', status: healthStatus.gemini_ai, icon: Cpu },
+                      { name: 'DeepSeek AI API', status: healthStatus.deepseek_ai, icon: Cpu },
                       { name: 'Flutterwave Config', status: healthStatus.flutterwave, icon: ShieldCheck },
                     ].map((item, idx) => {
                       const isConnected = item.status === 'Connected';

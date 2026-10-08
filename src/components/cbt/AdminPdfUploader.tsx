@@ -436,8 +436,8 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
       }
 
       if (!res.ok) {
-        if (res.status === 429 || result.code === 'GEMINI_QUOTA_EXCEEDED') {
-          throw new Error('Gemini API quota exceeded. Please try again later.');
+        if (res.status === 429 || res.status === 402 || result.code === 'DEEPSEEK_QUOTA_EXCEEDED') {
+          throw new Error('AI provider quota exceeded. Please try again later.');
         } else {
           throw new Error(result.error || `Failed with status ${res.status}`);
         }
