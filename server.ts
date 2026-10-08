@@ -104,6 +104,96 @@ async function readCbtSettings(sb: ReturnType<typeof createSupabaseClient>) {
 }
 
 /**
+ * Read the one active semester from `platform_settings.academic`.
+ *
+ * Returns null when it cannot be determined, and every caller MUST treat null as
+ * "do not filter" rather than "filter everything out". Fail-open for exactly the
+ * same reason as `readCbtSettings`: a transient settings read must not empty
+ * every drill and every library on the platform. A closed platform is a much
+ * worse failure than an unfiltered one, and the value is re-read on each start.
+ *
+ * Only the two real semesters are accepted. A blank or unrecognised value is
+ * discarded rather than passed through, because a value that matches no course
+ * would silently hide all content — the same reasoning as `coerceAcademic` on
+ * the client.
+ */
+async function readActiveSemester(
+  sb: ReturnType<typeof createSupabaseClient>,
+): Promise<'First Semester' | 'Second Semester' | null> {
+  try {
+    const { data, error } = await sb
+      .from('platform_settings')
+      .select('settings')
+      .eq('category', 'academic')
+      .maybeSingle();
+    if (error || !data || !data.settings || typeof data.settings !== 'object') return null;
+    const value = (data.settings as Record<string, any>).current_semester;
+    return value === 'First Semester' || value === 'Second Semester' ? value : null;
+  } catch (err) {
+    console.warn('[Platform Settings] Academic semester read failed, not filtering:', err);
+    return null;
+  }
+}
+
+/**
+ * Which semester each Undergraduate course belongs to, keyed by normalised
+ * course code.
+ *
+ * `cbt_exams` and `question_papers` carry no semester of their own — the
+ * semester belongs to the COURSE, so it is resolved through `courses.course_code`
+ * (the same join the admin analytics rollup uses).
+ *
+ * Returns null on failure, which callers read as "cannot scope" and therefore
+ * serve unfiltered.
+ */
+async function readCourseSemesterMap(
+  sb: ReturnType<typeof createSupabaseClient>,
+): Promise<Map<string, Set<string>> | null> {
+  try {
+    const { data, error } = await sb
+      .from('courses')
+      .select('course_code, semester')
+      .eq('portal', 'Undergraduate');
+    if (error) throw error;
+
+    const map = new Map<string, Set<string>>();
+    (data || []).forEach((row: any) => {
+      const code = String(row?.course_code || '').replace(/\s+/g, '').toLowerCase();
+      const semester = String(row?.semester || '').trim();
+      if (!code || !semester) return;
+      if (!map.has(code)) map.set(code, new Set());
+      map.get(code)!.add(semester);
+    });
+    return map;
+  } catch (err) {
+    console.warn('[Platform Settings] Course semester map read failed, not filtering:', err);
+    return null;
+  }
+}
+
+/**
+ * Whether a course code is offered in the given semester.
+ *
+ * A course with no `courses` row, or with a blank semester, is KEPT. That is not
+ * a loophole — it is what stops this filter from deleting content that works
+ * today: the CBT-only practical papers (PHY 107, CHM 107 …) have no `courses`
+ * entry at all, and courses created before the semester column existed have no
+ * value. Only a course POSITIVELY tagged with the other semester is withheld.
+ */
+function isOfferedInSemester(
+  courseCode: string | null | undefined,
+  activeSemester: string | null,
+  semesterMap: Map<string, Set<string>> | null,
+): boolean {
+  if (!activeSemester || !semesterMap) return true;
+  const code = String(courseCode || '').replace(/\s+/g, '').toLowerCase();
+  if (!code) return true;
+  const semesters = semesterMap.get(code);
+  if (!semesters || semesters.size === 0) return true;
+  return semesters.has(activeSemester);
+}
+
+/**
  * The ONE model the PDF→UTME-CBT importer is allowed to use.
  *
  * Single source of truth on purpose. The importer previously carried a
@@ -1185,7 +1275,35 @@ Instructions:
         return res.json({ attemptId: null, questions: [] });
       }
 
-      let examIds = matchedExams.map(e => e.id);
+      // ---- ACTIVE SEMESTER GATE -----------------------------------------
+      // The drilling UI already refuses to offer the closed semester's course
+      // list, but a button that is hidden (or a page that went stale before the
+      // admin switched semester) is not a rule — the request can still be made.
+      // This is where a closed-semester paper is actually refused, the same way
+      // `readCbtSettings` refuses a closed CBT session rather than trusting the
+      // client to hide it.
+      //
+      // The two semesters' papers are separate question banks, so serving the
+      // wrong one is not "extra practice" — it is drilling material the platform
+      // has not opened.
+      const [activeSemester, semesterMap] = await Promise.all([
+        readActiveSemester(sb),
+        readCourseSemesterMap(sb),
+      ]);
+
+      const scopedExams = matchedExams.filter((e: any) =>
+        isOfferedInSemester(e.course_code, activeSemester, semesterMap),
+      );
+
+      if (scopedExams.length === 0) {
+        console.log(
+          `[CBT Start] ${matchedExams.length} exam(s) matched "${courseCode}" but none belong to the ` +
+          `active semester (${activeSemester}). Serving none rather than the closed semester's paper.`,
+        );
+        return res.json({ attemptId: null, questions: [] });
+      }
+
+      let examIds = scopedExams.map(e => e.id);
 
       // Fetch all questions for those exams
       const { data: questions, error: qErr } = await sb.from('cbt_questions')
@@ -1350,8 +1468,28 @@ Instructions:
         global: { headers: { Authorization: authHeader } }
       });
 
-      const { data: examData } = await sb.from('cbt_exams').select('duration_minutes').eq('id', examId).single();
+      const { data: examData } = await sb
+        .from('cbt_exams')
+        .select('duration_minutes, course_code')
+        .eq('id', examId)
+        .single();
       const duration = examData?.duration_minutes ? examData.duration_minutes * 60 : 1800;
+
+      // Same active-semester gate as /api/cbt/start. This route hands out any
+      // exam by id, so without it a closed-semester paper stayed reachable by id
+      // even though the drilling UI never links to one. No live component calls
+      // this — every student drill posts to /api/cbt/start — which is exactly
+      // why the gate belongs here rather than being left as a standing hole.
+      const [activeSemester, semesterMap] = await Promise.all([
+        readActiveSemester(sb),
+        readCourseSemesterMap(sb),
+      ]);
+      if (!isOfferedInSemester(examData?.course_code, activeSemester, semesterMap)) {
+        console.log(
+          `[CBT Exam] refusing exam ${examId} (${examData?.course_code}) — not offered in ${activeSemester}.`,
+        );
+        return res.json({ questions: [], duration });
+      }
 
       const { data: questions, error: qErr } = await sb.from('cbt_questions')
         .select('id, exam_id, question_text, option_a, option_b, option_c, option_d, marks, topic, difficulty')

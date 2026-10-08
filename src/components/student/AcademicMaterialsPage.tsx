@@ -88,17 +88,16 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
         // dropped: when NO course carries a level, the single "Undergraduate"
         // entry is kept as a catch-all so the library stays reachable rather
         // than rendering empty.
+        // The level grid is deliberately NOT pre-selected from `profile.level`.
+        // It used to jump straight to the student's own level on load, which
+        // skipped this step entirely and left no way back to the full hierarchy
+        // (Levels -> Courses -> Topics -> Materials) without pressing Back. The
+        // student now always lands on the level list and chooses.
         const levelValues = Array.from(
           new Set(undergradCourses.map(c => String(c.level ?? '').trim()).filter(Boolean)),
         ).sort();
         const uniqueLevels = levelValues.length > 0 ? levelValues : ['Undergraduate'];
 
-        // Also pre-select level if student profile has it
-        if (profile?.level && uniqueLevels.includes(profile.level) && !selectedLevel) {
-           setSelectedLevel(profile.level);
-           fetchCourses(profile.level);
-        }
-        
         // Sort levels (e.g., 100 Level, 200 Level)
         uniqueLevels.sort();
         setLevels(uniqueLevels);
