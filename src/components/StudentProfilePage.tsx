@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import DashboardLayout from './dashboard/DashboardLayout';
 import { useProfile } from '../lib/useProfile';
+import { cbtLabelForPortal, cbtRouteForPortal } from '../lib/portalRoutes';
 import { supabase } from '../supabaseClient';
 
 interface StudentProfilePageProps {
@@ -421,13 +422,14 @@ export default function StudentProfilePage({ onLogout, onNavigate }: StudentProf
                           <span>{activity.time}</span>
                         </div>
                       </div>
-                      {/* Routes to the existing UTME CBT centre, which holds the
-                          practice history for the attempts listed here. This
-                          previously went to 'courses', a route that no longer
-                          exists, so the arrow led nowhere. */}
+                      {/* Each programme keeps its practice history in its own
+                          CBT centre, and the profile decides which. This
+                          hardcoded the UTME centre, so an Undergraduate student
+                          was sent to the wrong page; before that it pointed at
+                          'courses', a route that no longer exists at all. */}
                       <button
-                        onClick={() => onNavigate && onNavigate('utme')}
-                        aria-label="Open UTME CBT history"
+                        onClick={() => onNavigate && onNavigate(cbtRouteForPortal(profile?.portal))}
+                        aria-label={`Open ${cbtLabelForPortal(profile?.portal)} history`}
                         className="p-2 rounded-full hover:bg-slate-800 text-slate-400 hover:text-white transition-colors shrink-0"
                       >
                         <ArrowRight size={14} />

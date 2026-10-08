@@ -1,8 +1,10 @@
 import { PenTool, Megaphone, Clock, Award } from 'lucide-react';
 import { motion } from 'motion/react';
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { useProfile } from '../../lib/useProfile';
+import { cbtRouteForPortal } from '../../lib/portalRoutes';
+import { useRefetchOnFocus } from '../../lib/useRefetchOnFocus';
 
 interface ActivityAndAnnouncementsProps {
   onNavigate?: (view: string) => void;
@@ -13,7 +15,7 @@ export default function ActivityAndAnnouncements({ onNavigate }: ActivityAndAnno
   const [announcements, setAnnouncements] = useState<any[]>([]);
   const [activities, setActivities] = useState<any[]>([]);
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (!profile) return;
     const fetchAnnouncements = async () => {
       try {
@@ -104,9 +106,16 @@ export default function ActivityAndAnnouncements({ onNavigate }: ActivityAndAnno
       }
     };
 
-    fetchAnnouncements();
-    fetchActivities();
-  }, [profile?.id, profile?.role]);
+    await Promise.all([fetchAnnouncements(), fetchActivities()]);
+  }, [profile]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // A drill completed from the materials page does not navigate away, so this
+  // feed would otherwise keep showing the activity it fetched on mount.
+  useRefetchOnFocus(load);
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-10">
@@ -125,11 +134,10 @@ export default function ActivityAndAnnouncements({ onNavigate }: ActivityAndAnno
               whileHover={{ x: 4 }}
               onClick={() => {
                 if (activity.type === 'chat') if (onNavigate) onNavigate('chats');
-                // UTME students' CBT history lives on the 'utme' route; 'cbt' is
-                // the undergraduate practice page. Only an explicitly
-                // Undergraduate portal goes there.
+                // Each programme keeps its CBT history in its own centre; the
+                // profile decides which. See lib/portalRoutes.ts.
                 if (activity.type === 'cbt') {
-                  if (onNavigate) onNavigate(profile?.portal === 'Undergraduate' ? 'cbt' : 'utme');
+                  if (onNavigate) onNavigate(cbtRouteForPortal(profile?.portal));
                 }
               }}
               className="flex items-center gap-4 p-3 rounded-xl hover:bg-slate-800/50 transition-colors cursor-pointer group"
@@ -151,10 +159,11 @@ export default function ActivityAndAnnouncements({ onNavigate }: ActivityAndAnno
               <Clock className="w-12 h-12 text-slate-700 mx-auto mb-3" />
               <p className="text-slate-400 font-medium">No recent activity found.</p>
               {/* Was labelled "Start learning" and routed to 'courses', a view
-                  that no longer exists, so it led nowhere. Now points at the
-                  UTME CBT centre. */}
+                  that no longer exists, so it led nowhere. It then hardcoded the
+                  UTME centre, which sent an Undergraduate student to the wrong
+                  CBT page; the profile now picks the centre. */}
               <button
-                onClick={() => onNavigate && onNavigate('utme')}
+                onClick={() => onNavigate && onNavigate(cbtRouteForPortal(profile?.portal))}
                 className="mt-2 text-sm text-indigo-400 hover:text-indigo-300 transition-colors"
               >
                 Take a CBT practice

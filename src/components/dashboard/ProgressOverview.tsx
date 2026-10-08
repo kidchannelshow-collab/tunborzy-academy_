@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { BookOpen, Clock, Target } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useProfile } from '../../lib/useProfile';
+import { useRefetchOnFocus } from '../../lib/useRefetchOnFocus';
 
 export default function ProgressOverview() {
   const { profile } = useProfile();
@@ -12,9 +13,8 @@ export default function ProgressOverview() {
     cbtAvg: 0,
   });
 
-  useEffect(() => {
+  const fetchStats = useCallback(async () => {
     if (!profile) return;
-    const fetchStats = async () => {
       try {
         // A student's completed sittings live in the table for their portal:
         // UTME sittings in `utme_attempts` (keyed by `student_id`), the
@@ -108,9 +108,17 @@ export default function ProgressOverview() {
       } catch (err) {
         console.error(err);
       }
-    };
+  }, [profile]);
+
+  useEffect(() => {
     fetchStats();
-  }, [profile?.id, profile?.role]);
+  }, [fetchStats]);
+
+  // "Today's Progress" is the figure most likely to go stale: a practice drill
+  // launched from the materials page runs in a modal and never navigates away,
+  // so this dashboard stays mounted while an attempt is completed. Re-read
+  // whenever the page is looked at again.
+  useRefetchOnFocus(fetchStats);
 
   const stats = [
     { label: 'Courses Enrolled Today', value: `${statsData.topicsCount}`, icon: BookOpen, color: 'text-blue-500', bg: 'bg-blue-500/10' },

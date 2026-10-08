@@ -1,4 +1,10 @@
 import { useProfile } from '../../lib/useProfile';
+import {
+  cbtLabelForPortal,
+  cbtRouteForPortal,
+  learningRouteForPortal,
+  normalisePortal,
+} from '../../lib/portalRoutes';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   LayoutDashboard, BookOpen, PenTool, FileText, Library, 
@@ -15,14 +21,18 @@ interface SidebarProps {
 
 export default function Sidebar({ isOpen, setIsOpen, onLogout, currentView = 'dashboard', onNavigate }: SidebarProps) {
   const { profile } = useProfile();
-  const studentPortal = profile?.portal || 'Undergraduate';
+  const studentPortal = normalisePortal(profile?.portal);
   const isStaff = profile?.role === 'Admin' || profile?.role === 'Lecturer';
 
-  const cbtItem = studentPortal === 'UTME' 
-    ? { icon: Award, label: 'UTME CBT', id: 'utme' }
-    : studentPortal === 'Post-UTME'
-    ? { icon: Award, label: 'Post-UTME CBT', id: 'utme' }
-    : { icon: PenTool, label: 'Undergraduate CBT', id: 'cbt' };
+  // Only the icon varies per programme — a drill pen for the undergraduate
+  // practice page, an exam award for the two exam centres. The route and the
+  // label come from the shared map so this cannot drift from the Quick Actions
+  // tiles, the analytics empty state or the profile history link.
+  const cbtItem = {
+    icon: studentPortal === 'Undergraduate' ? PenTool : Award,
+    label: cbtLabelForPortal(studentPortal),
+    id: cbtRouteForPortal(studentPortal),
+  };
 
   const menuItems = isStaff ? [
     { icon: LayoutDashboard, label: 'Overview', id: 'overview' },
@@ -37,7 +47,7 @@ export default function Sidebar({ isOpen, setIsOpen, onLogout, currentView = 'da
       ? [{
           icon: Library,
           label: 'Academic Materials',
-          id: studentPortal === 'Post-UTME' ? 'post-utme-learning' : 'academic-materials',
+          id: learningRouteForPortal(studentPortal),
         }]
       : []),
     { icon: BarChart2, label: 'Performance Analytics', id: 'analytics' },

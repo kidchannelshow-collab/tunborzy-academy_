@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { motion } from 'motion/react';
 import {
   BarChart2, Activity, Target, TrendingUp, BookOpen, Clock, Award, Calendar, Layers,
@@ -11,6 +11,8 @@ import {
 import DashboardLayout from './dashboard/DashboardLayout';
 import { supabase } from '../supabaseClient';
 import { useProfile } from '../lib/useProfile';
+import { cbtLabelForPortal, cbtRouteForPortal } from '../lib/portalRoutes';
+import { useRefetchOnFocus } from '../lib/useRefetchOnFocus';
 
 interface PerformanceAnalyticsPageProps {
   onLogout: () => void;
@@ -71,12 +73,15 @@ export default function PerformanceAnalyticsPage({ onLogout, onNavigate }: Perfo
 
   // Re-runs whenever the page mounts. Both dashboard and analytics are rendered
   // conditionally per view in App.tsx, so returning from a CBT remounts this
-  // page and picks up the newly completed attempt — no polling needed.
-  useEffect(() => {
-    async function fetchAnalytics() {
-      if (!profile) return;
-      setLoading(true);
-      try {
+  // page and picks up the newly completed attempt.
+  //
+  // `silent` skips the loading spinner, for the focus refresh below — blanking
+  // the charts every time the tab is looked at would be worse than the staleness
+  // it fixes.
+  const fetchAnalytics = useCallback(async (options?: { silent?: boolean }) => {
+    if (!profile) return;
+    if (!options?.silent) setLoading(true);
+    try {
         // The student's OWN completed sittings, read from the table each portal
         // records into: UTME in `utme_attempts` (keyed by student_id), the
         // undergraduate drill in `cbt_attempts` (keyed by user_id), and Post-UTME
@@ -149,11 +154,25 @@ export default function PerformanceAnalyticsPage({ onLogout, onNavigate }: Perfo
       } catch (err) {
         console.error(err);
       } finally {
-        setLoading(false);
+        if (!options?.silent) setLoading(false);
       }
-    }
-    fetchAnalytics();
   }, [profile]);
+
+  useEffect(() => {
+    fetchAnalytics();
+  }, [fetchAnalytics]);
+
+  /**
+   * A completed CBT is recorded by the server on submit, and nothing pushes that
+   * to a page that is already open. Navigating away and back refetches, because
+   * the views are conditionally rendered in App.tsx and this one unmounts — but
+   * a tab that merely sat open would keep showing the figures from before the
+   * attempt. Re-reading when the page is looked at again is the one signal
+   * available, and it costs nothing while the tab is in the background.
+   */
+  useRefetchOnFocus(() => {
+    fetchAnalytics({ silent: true });
+  });
 
   /** Everything below derives from `sittings` + `period`. No stored counters. */
   const stats = useMemo(() => {
@@ -310,11 +329,15 @@ export default function PerformanceAnalyticsPage({ onLogout, onNavigate }: Perfo
             <p className="text-slate-400 max-w-md mx-auto mb-8">
               Complete a CBT practice session and your performance analytics will appear here automatically.
             </p>
+            {/* This hardcoded the UTME centre and was labelled for it, so an
+                Undergraduate or Post-UTME student pressing it landed in the
+                wrong CBT. Both the route and the label now come from the
+                student's own programme. */}
             <button
-              onClick={() => onNavigate && onNavigate('utme')}
+              onClick={() => onNavigate && onNavigate(cbtRouteForPortal(profile?.portal))}
               className="bg-indigo-500 hover:bg-indigo-400 text-white px-6 py-3 rounded-xl font-bold transition-all shadow-lg shadow-indigo-500/25"
             >
-              Go to UTME CBT
+              Go to {cbtLabelForPortal(profile?.portal)}
             </button>
           </div>
         ) : (

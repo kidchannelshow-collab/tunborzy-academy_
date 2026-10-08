@@ -462,7 +462,16 @@ export default function AnnouncementCenter({ onBack, onNavigate }: { onBack?: ()
 
   const UserView = () => (
     <div className="flex flex-col lg:flex-row gap-8 items-start">
-      <div className="w-full lg:w-64 flex-shrink-0 space-y-2 sticky top-24">
+      {/* The tab rail is sticky on DESKTOP ONLY.
+          `sticky top-24` previously applied at every width. On a phone the rail
+          is a full-width block (the layout is a column below `lg`), so it became
+          a bar pinned 6rem from the top with no background of its own — the
+          search box and the notification cards scrolled underneath it and the
+          two sets of text were drawn on top of each other.
+          Below `lg` it is now an ordinary block that scrolls with the page. The
+          opaque background and z-index apply only while it is actually sticky,
+          where they stop content showing through as it passes behind. */}
+      <div className="w-full lg:w-64 flex-shrink-0 space-y-2 lg:sticky lg:top-24 lg:z-20 lg:bg-[#020617] lg:pb-4">
         {[
           { id: 'all', label: 'All Messages', icon: Bell, count: notifications.length },
           { id: 'unread', label: 'Unread', icon: CheckCircle, count: notifications.filter(n => !n.is_read).length },

@@ -2,6 +2,11 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Lock, Crown, RefreshCcw, PenTool, CheckCircle2, Loader2, BookOpen } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useProfile } from '../../lib/useProfile';
+import {
+  cbtRouteForPortal,
+  learningRouteForPortal,
+  normalisePortal,
+} from '../../lib/portalRoutes';
 import { supabase } from '../../supabaseClient';
 import { readApiJsonOrThrow } from '../../lib/apiResponse';
 
@@ -173,23 +178,23 @@ export default function PremiumFeatures({ onNavigate }: PremiumFeaturesProps) {
     }
   };
 
-  // A UTME student's CBT lives on the 'utme' route. This card used to hard-code
+  // A UTME student's CBT lives on the 'utme' route. This card once hard-coded
   // id 'cbt', which is the undergraduate practice page, so clicking Premium CBT
-  // on the UTME student dashboard opened the wrong CBT flow. Only an explicitly
-  // Undergraduate portal keeps the undergraduate route.
-  const cbtRoute = profile?.portal === 'Undergraduate' ? 'cbt' : 'utme';
+  // on the UTME student dashboard opened the wrong CBT flow.
+  //
+  // Route and programme now come from the shared map in lib/portalRoutes.ts,
+  // which is also what the Sidebar, the Quick Actions tiles and the analytics
+  // page use — this was the third copy of the same rule.
+  const cbtRoute = cbtRouteForPortal(profile?.portal);
 
   // Post-UTME and Undergraduate students reach their lessons through the
   // Academic Materials system, so each gets a card pointing at it. UTME has no
-  // materials system, so it is not offered there. A Post-UTME student's lessons
-  // live on their own learning route — the same one their sidebar opens — and
-  // Undergraduate keeps the original route.
-  const materialsRoute =
-    profile?.portal === 'Post-UTME' ? 'post-utme-learning' : 'academic-materials';
+  // materials system, so it is not offered there.
+  const materialsRoute = learningRouteForPortal(profile?.portal);
 
   const features: { title: string; icon: any; desc: string; id: string; unlocked?: boolean }[] = [
     { title: 'Premium CBT', icon: PenTool, desc: 'Full-length timed mock exams with analytics.', id: cbtRoute },
-    ...(profile?.portal === 'UTME'
+    ...(normalisePortal(profile?.portal) === 'UTME'
       ? []
       : [
           {

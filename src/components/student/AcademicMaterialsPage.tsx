@@ -58,7 +58,8 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
       // students on its own.
       const { data, error } = await supabase
         .from('courses')
-        .select('portal, status')
+        // `level` is needed to build the level list below — see fetchLevels.
+        .select('portal, status, level')
         .eq('is_archived', false);
       
       if (error) throw error;
@@ -77,8 +78,21 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
         // which filters `.eq('portal', 'Post-UTME')` on both courses and
         // materials. Filtering here is what keeps the two libraries separate.
         const undergradCourses = activeCourses.filter(c => c.portal === 'Undergraduate');
-        const uniqueLevels = Array.from(new Set(undergradCourses.map(c => c.portal))).filter(Boolean);
-        
+
+        // The level cards come from `courses.level` ("100 Level", "200 Level").
+        // This previously read `c.portal`, which is 'Undergraduate' on every row
+        // of this list — so the grid collapsed to a single "Undergraduate" card
+        // and the student's own level below could never match it.
+        //
+        // A course with no `level` set (rows predating the column) is not
+        // dropped: when NO course carries a level, the single "Undergraduate"
+        // entry is kept as a catch-all so the library stays reachable rather
+        // than rendering empty.
+        const levelValues = Array.from(
+          new Set(undergradCourses.map(c => String(c.level ?? '').trim()).filter(Boolean)),
+        ).sort();
+        const uniqueLevels = levelValues.length > 0 ? levelValues : ['Undergraduate'];
+
         // Also pre-select level if student profile has it
         if (profile?.level && uniqueLevels.includes(profile.level) && !selectedLevel) {
            setSelectedLevel(profile.level);
@@ -103,10 +117,14 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
       setError(null);
       setSelectedLevel(level);
       
+      // This is the UNDERGRADUATE library, so the portal is pinned rather than
+      // taken from the argument. The parameter is a LEVEL ("100 Level"), and the
+      // query used to pass it straight to `.eq('portal', level)` — which only
+      // ever matched because the level list was itself derived from `portal`.
       const { data, error } = await supabase
         .from('courses')
         .select('*')
-        .eq('portal', level)
+        .eq('portal', 'Undergraduate')
         .eq('status', 'Published')
         // Archived courses are hidden from students. Archiving is a deliberate
         // staff action meaning "retire this", so it must not remain browsable.
@@ -120,14 +138,14 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
       // a semester concept — CourseManagement writes `semester: null` for UTME
       // and Post-UTME courses, which have their own structure.
       //
-      // The filter is null-safe on purpose: an untagged course is KEPT. Courses
-      // created before the semester column existed have no value, and dropping
-      // them would make parts of the library silently vanish for students rather
-      // than simply withholding the closed semester.
+      // Both tests are null-safe on purpose: an untagged row is KEPT. Courses
+      // created before these columns existed have no value, and dropping them
+      // would make parts of the library silently vanish rather than simply
+      // withholding the closed semester. `level === 'Undergraduate'` is the
+      // catch-all entry used when no course carries a level (see fetchLevels).
       setCourses((data || []).filter(c =>
-        level !== 'Undergraduate' ||
-        !c.semester ||
-        c.semester === activeSemester
+        (level === 'Undergraduate' || !c.level || c.level === level) &&
+        (!c.semester || c.semester === activeSemester)
       ));
     } catch (err: any) {
       setError('Failed to load courses.');
@@ -143,21 +161,39 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
       setError(null);
       setSelectedCourse(course);
       
+      // `materials` carries its OWN `portal` and `semester`, and this query used
+      // to filter on `course_code` alone. Course codes are not unique across
+      // programmes, so a UTME or Post-UTME lesson sharing a code with an
+      // Undergraduate course was pulled into this library — and a lesson written
+      // for the closed semester appeared beside the open one.
+      //
+      // `portal` is NOT NULL on this table, so the equality test is a strict
+      // exclusion and no untagged row can slip through. `semester` IS nullable,
+      // so it is filtered just below instead.
       const { data, error } = await supabase
         .from('materials')
         .select('*')
         .eq('course_code', course.course_code)
+        .eq('portal', 'Undergraduate')
         .eq('is_published', true)
         .eq('file_type', 'lesson')
         .order('order_index', { ascending: true })
         .order('created_at', { ascending: true });
-        
+
       if (error) throw error;
-      
+
+      // Only the semester the admin has open (System Settings → Academic
+      // Sessions), mirroring the course list. Null-safe: a lesson with no
+      // semester recorded is kept, because dropping untagged content would hide
+      // material published before the column existed.
+      const visible = (data || []).filter(
+        (m: any) => !m.semester || m.semester === activeSemester,
+      );
+
       // Group by topic
       if (data) {
         const topicMap = new Map<string, any[]>();
-        data.forEach(m => {
+        visible.forEach(m => {
           const t = m.topic || 'General';
           if (!topicMap.has(t)) topicMap.set(t, []);
           topicMap.get(t)!.push(m);

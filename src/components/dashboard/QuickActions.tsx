@@ -1,6 +1,12 @@
 import { motion } from 'motion/react';
 import { BookOpen, PenTool, RefreshCcw, BarChart2, Award } from 'lucide-react';
 import { useProfile } from '../../lib/useProfile';
+import {
+  cbtLabelForPortal,
+  cbtRouteForPortal,
+  learningRouteForPortal,
+  normalisePortal,
+} from '../../lib/portalRoutes';
 
 interface QuickActionsProps {
   onNavigate?: (view: string) => void;
@@ -8,16 +14,23 @@ interface QuickActionsProps {
 
 export default function QuickActions({ onNavigate }: QuickActionsProps) {
   const { profile } = useProfile();
-  const studentPortal = profile?.portal || 'Undergraduate';
+  const studentPortal = normalisePortal(profile?.portal);
 
-  const cbtAction = studentPortal === 'UTME' 
-    ? { icon: Award, label: 'UTME CBT', color: 'from-emerald-400 to-teal-600', shadow: 'shadow-emerald-500/20', id: 'utme' }
-    : studentPortal === 'Post-UTME'
-    ? { icon: Award, label: 'Post-UTME CBT', color: 'from-emerald-400 to-teal-600', shadow: 'shadow-emerald-500/20', id: 'utme' }
-    : { icon: PenTool, label: 'Undergraduate CBT', color: 'from-amber-400 to-amber-600', shadow: 'shadow-amber-500/20', id: 'cbt' };
+  // Colour and icon vary per programme; the route and the label come from the
+  // shared map so these tiles cannot disagree with the Sidebar or with the
+  // analytics/profile entry points.
+  const cbtAction = studentPortal === 'Undergraduate'
+    ? { icon: PenTool, label: cbtLabelForPortal(studentPortal), color: 'from-amber-400 to-amber-600', shadow: 'shadow-amber-500/20', id: cbtRouteForPortal(studentPortal) }
+    : { icon: Award, label: cbtLabelForPortal(studentPortal), color: 'from-emerald-400 to-teal-600', shadow: 'shadow-emerald-500/20', id: cbtRouteForPortal(studentPortal) };
 
   const actions = [
-    ...(studentPortal !== 'UTME' ? [{ icon: BookOpen, label: 'Academic Materials', color: 'from-blue-500 to-indigo-600', shadow: 'shadow-blue-500/20', id: 'academic-materials' }] : []),
+    // Post-UTME has its own Course -> Topic -> Lesson page. This tile used to
+    // send it to 'academic-materials' — the Undergraduate library, which is
+    // hardcoded to that portal and drills against the wrong tables — while the
+    // Sidebar sent the same student to the right page.
+    ...(studentPortal !== 'UTME'
+      ? [{ icon: BookOpen, label: 'Academic Materials', color: 'from-blue-500 to-indigo-600', shadow: 'shadow-blue-500/20', id: learningRouteForPortal(studentPortal) }]
+      : []),
     cbtAction,
     { icon: BarChart2, label: 'Performance Analytics', color: 'from-orange-400 to-orange-600', shadow: 'shadow-orange-500/20', id: 'analytics' },
   ];
