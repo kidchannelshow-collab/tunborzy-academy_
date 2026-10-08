@@ -1513,7 +1513,7 @@ Instructions:
   //   submit -> { score, totalCorrect, totalWrong, totalQuestions, results }
   app.post('/api/post-utme/start', async (req, res) => {
     try {
-      const { examId } = req.body;
+      const { examId, limit, mode, topic, topics } = req.body;
       const authHeader = req.headers.authorization;
       if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
 
@@ -1560,16 +1560,62 @@ Instructions:
 
       if (qErr) throw qErr;
 
+      // ---- SCOPING ---------------------------------------------------------
+      // This endpoint used to return the whole paper, every time. A 1,000-question
+      // bank meant a 1,000-question sitting with no way to ask for less, which is
+      // not practice — and it is the one thing the Undergraduate and UTME drills
+      // both already let a student control. The same three knobs are now honoured
+      // here: `mode` ('random' | 'topic'), `topic`/`topics`, and `limit`.
+      let scoped = questions || [];
+
+      const wantedTopics = Array.isArray(topics)
+        ? topics.map((t: any) => String(t).trim().toLowerCase()).filter(Boolean)
+        : [];
+
+      if (mode === 'topic' && topic) {
+        const wanted = String(topic).trim().toLowerCase();
+        scoped =
+          wanted === 'uncategorized'
+            ? scoped.filter(q => !q.topic || !q.topic.trim() || q.topic.trim().toLowerCase() === 'general')
+            : scoped.filter(q => q.topic && q.topic.trim().toLowerCase() === wanted);
+      } else if (wantedTopics.length > 0) {
+        scoped = scoped.filter(q => q.topic && wantedTopics.includes(q.topic.trim().toLowerCase()));
+      }
+      // mode 'random' (or absent) keeps every question in the paper.
+
+      // Shuffled, so a repeat drill is not the same paper in the same order.
+      scoped = [...scoped].sort(() => 0.5 - Math.random());
+
+      // The admin-configured default (System Settings → CBT Configuration) is the
+      // fallback, exactly as /api/cbt/start uses it — not "everything".
+      const reqLimit = limit ? parseInt(String(limit), 10) : cbtSettings.default_question_count;
+      if (Number.isFinite(reqLimit) && reqLimit > 0) {
+        scoped = scoped.slice(0, reqLimit);
+      }
+
+      if (scoped.length === 0) {
+        // Nothing matched the student's filters. Return an empty sitting rather
+        // than an error: the client renders its own "no questions" state, and a
+        // topic with no questions in one paper is not a server fault.
+        console.log(`[Post-UTME Start] no questions matched mode=${mode} topic=${topic} in exam ${examId}`);
+        return res.json({ attemptId: null, questions: [] });
+      }
+
       const { data: attempt, error: attemptErr } = await sb.from('post_utme_attempts').insert({
         exam_id: examId,
         user_id: userResponse.user.id,
         status: 'in_progress',
-        answers: { question_ids: (questions || []).map(q => q.id) }
+        answers: { question_ids: scoped.map(q => q.id) }
       }).select().single();
 
       if (attemptErr) throw attemptErr;
 
-      res.json({ attemptId: attempt.id, questions: questions || [] });
+      console.log(
+        `[Post-UTME Start] serving ${scoped.length}/${(questions || []).length} question(s) ` +
+        `(mode=${mode || 'random'}, limit=${reqLimit}) for exam ${examId}`,
+      );
+
+      res.json({ attemptId: attempt.id, questions: scoped });
     } catch (err: any) {
       console.error('[Post-UTME Start Error]', err);
       res.status(500).json({ error: err.message });
