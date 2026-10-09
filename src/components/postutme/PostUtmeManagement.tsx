@@ -13,6 +13,7 @@ import {
   POST_UTME_UNIVERSITY_CODE,
   POST_UTME_UNIVERSITY_NAME,
 } from '../../lib/postUtme';
+import { OPTION_LETTERS, availableOptionLetters } from '../../lib/questionOptions';
 
 /**
  * Post-UTME Manager — the single staff surface for the Post-UTME programme.
@@ -401,10 +402,13 @@ export default function PostUtmeManagement() {
 
   const openQuestionForm = (q: any = null) => {
     setEditingQuestionId(q?.id ?? null);
+    // `option_e` is NULL on rows written before the fifth option existed; the
+    // inputs read through `|| ''`, but normalising here keeps the form state a
+    // string and stops an untouched option saving back as null.
     setCurrentQuestion(
       q
-        ? { ...q }
-        : { correct_option: 'A', difficulty: 'medium', marks: 1 },
+        ? { ...q, option_e: q.option_e || '' }
+        : { correct_option: 'A', difficulty: 'medium', marks: 1, option_e: '' },
     );
     setIsQuestionModalOpen(true);
   };
@@ -423,6 +427,9 @@ export default function PostUtmeManagement() {
         option_b: currentQuestion.option_b,
         option_c: currentQuestion.option_c,
         option_d: currentQuestion.option_d,
+        // Empty string rather than undefined, so a four-option question clears
+        // the column instead of leaving a stale fifth option behind.
+        option_e: currentQuestion.option_e || '',
         correct_option: currentQuestion.correct_option || 'A',
         explanation: currentQuestion.explanation || '',
         marks: Number(currentQuestion.marks) || 1,
@@ -1003,7 +1010,7 @@ export default function PostUtmeManagement() {
                           <p className="font-medium text-white text-sm">{q.question_text}</p>
 
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                            {['A', 'B', 'C', 'D'].map((opt) => {
+                            {availableOptionLetters(q).map((opt) => {
                               const isCorrect = q.correct_option === opt;
                               return (
                                 <div
@@ -1499,11 +1506,13 @@ export default function PostUtmeManagement() {
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
-              {['a', 'b', 'c', 'd'].map((letter) => (
+              {/* A–D are required; E is not — most questions stop at four, so a
+                  blank fifth option is left out rather than saved as empty text. */}
+              {['a', 'b', 'c', 'd', 'e'].map((letter) => (
                 <div key={letter}>
                   <label className={labelCls}>Option {letter.toUpperCase()}</label>
                   <input
-                    required
+                    required={letter !== 'e'}
                     type="text"
                     value={currentQuestion[`option_${letter}`] || ''}
                     onChange={(e) =>
@@ -1524,7 +1533,7 @@ export default function PostUtmeManagement() {
                   }
                   className={`${inputCls} mt-1`}
                 >
-                  {['A', 'B', 'C', 'D'].map((o) => (
+                  {OPTION_LETTERS.map((o) => (
                     <option key={o} value={o}>
                       Option {o}
                     </option>

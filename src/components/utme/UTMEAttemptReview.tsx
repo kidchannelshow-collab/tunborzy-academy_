@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import { CheckCircle2, XCircle, MinusCircle, ChevronLeft, ChevronRight, ArrowLeft, Clock, Award } from 'lucide-react';
+import { availableOptionLetters } from '../../lib/questionOptions';
 
 /**
  * Read-only review of ONE saved CBT attempt.
@@ -23,6 +24,9 @@ export interface ReviewQuestion {
   option_b: string;
   option_c: string;
   option_d: string;
+  /** Fifth option. Optional: only a minority of papers carry one, and the
+   *  column is nullable, so a four-option question leaves it null. */
+  option_e?: string | null;
   /** null when the student never answered this question. */
   student_answer: string | null;
   correct_option: string;
@@ -49,8 +53,6 @@ interface UTMEAttemptReviewProps {
 
 /** Exactly 10 questions per review page. */
 const PAGE_SIZE = 10;
-
-const OPTION_LETTERS = ['A', 'B', 'C', 'D'] as const;
 
 const formatTime = (secs?: number) => {
   if (!secs && secs !== 0) return null;
@@ -191,9 +193,11 @@ export default function UTMEAttemptReview({
                 {q.question_text}
               </p>
 
-              {/* Options — stacked vertically, each labelled */}
+              {/* Options — stacked vertically, each labelled. Only the letters
+                  this question actually has text for: a five-option paper shows
+                  its E here, a four-option one is not given an empty fifth slot. */}
               <div className="space-y-2.5">
-                {OPTION_LETTERS.map((letter) => {
+                {availableOptionLetters(q).map((letter) => {
                   const text = (q as any)[`option_${letter.toLowerCase()}`];
                   const studentPicked = q.student_answer === letter;
                   const isCorrect = (q.correct_option || '').toUpperCase() === letter;

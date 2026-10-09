@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { POST_UTME_UNIVERSITY_CODE } from '../../lib/postUtme';
 import { FIRST_SEMESTER_COURSES, SECOND_SEMESTER_COURSES } from './CBTUndergraduateDrilling';
+import { availableOptionLetters } from '../../lib/questionOptions';
 import { 
   Sparkles, Trash2, Edit2, CheckCircle2, AlertCircle, Save, Check, 
   RefreshCw, ChevronLeft, ChevronRight, Upload, FileText, X, File, Layers, CheckSquare, Square, Award
@@ -13,6 +14,8 @@ interface QuestionItem {
   option_b: string;
   option_c: string;
   option_d: string;
+  /** Fifth option — only some papers print one, so it stays optional. */
+  option_e?: string;
   correct_option: string;
   explanation: string;
   topic: string;
@@ -344,6 +347,7 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
         option_b: q.option_b,
         option_c: q.option_c,
         option_d: q.option_d,
+        option_e: q.option_e || '',
         correct_option: q.correct_option,
         explanation: q.explanation || '',
         marks: q.marks || 1,
@@ -580,6 +584,7 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
             option_b: q.option_b,
             option_c: q.option_c,
             option_d: q.option_d,
+            option_e: q.option_e || '',
             correct_option: q.correct_option,
           })),
         }),
@@ -737,6 +742,7 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
           option_b: q.option_b,
           option_c: q.option_c,
           option_d: q.option_d,
+          option_e: q.option_e || '',
           // No `|| 'A'` fallback — `answered` guarantees a real key.
           correct_option: q.correct_option,
           explanation: q.explanation || '',
@@ -805,6 +811,7 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
           option_b: q.option_b,
           option_c: q.option_c,
           option_d: q.option_d,
+          option_e: q.option_e || '',
           // No `|| 'A'` fallback here any more — `answered` guarantees a real key.
           correct_option: q.correct_option,
           explanation: q.explanation || '',
@@ -1135,7 +1142,10 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
                         rows={3}
                       />
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {['A', 'B', 'C', 'D'].map(opt => (
+                        {/* Only the letters this question actually has text for,
+                            so a five-option paper is editable and a four-option
+                            one never grows an empty fifth field. */}
+                        {availableOptionLetters(editForm).map(opt => (
                           <div key={opt} className="flex items-center gap-2">
                             <span className="font-bold text-amber-400">{opt}:</span>
                             <input 
@@ -1158,7 +1168,7 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
                             {/* Kept empty-able: a question with no answer key must
                                 not silently look like it answers "A". */}
                             <option value="">— Not set —</option>
-                            {['A', 'B', 'C', 'D'].map(o => <option key={o} value={o}>{o}</option>)}
+                            {availableOptionLetters(editForm).map(o => <option key={o} value={o}>{o}</option>)}
                           </select>
                         </div>
                         <div>
@@ -1238,7 +1248,11 @@ export default function AdminPdfUploader({ destType = 'UTME' }: AdminPdfUploader
                       <p className="text-white font-medium mb-4 text-base">{q.question_text}</p>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 mb-4">
-                        {['A', 'B', 'C', 'D'].map(opt => {
+                        {/* Only the letters this question actually has text for:
+                            an empty `option_e` renders four options, not a blank
+                            fifth. A correct answer of 'E' highlights the same way
+                            A–D does, because the comparison below is per letter. */}
+                        {availableOptionLetters(q).map(opt => {
                           const optText = (q as any)[`option_${opt.toLowerCase()}`];
                           const isCorrect = (q.correct_option || '').toUpperCase() === opt;
                           return (

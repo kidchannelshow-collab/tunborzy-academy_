@@ -26,6 +26,15 @@ export interface ExtractedQuestion {
   option_b: string;
   option_c: string;
   option_d: string;
+  /**
+   * The fifth option, on the minority of papers that carry one.
+   *
+   * OPTIONAL, and deliberately `''` rather than null: the four-option majority is
+   * complete without it, and every renderer decides for itself whether to show a
+   * fifth slot (see CBTExamShell). Nothing may treat an empty `option_e` as a
+   * malformed question.
+   */
+  option_e: string;
   /** null when no answer key covered this question — never invented. */
   correct_option: string | null;
   explanation: string;
@@ -75,16 +84,22 @@ const QUESTION_START = /^\s*(?:Q(?:uestion)?\s*)?(\d{1,3})\s*[.)\]:-]\s*(.*)$/i;
 
 /**
  * Options: "A)", "A.", "(A)", "A:", "a)" — anchored at line start. Requires the
- * option letter to be a single A–D so a line beginning "A chemical..." with no
+ * option letter to be a single A–E so a line beginning "A chemical..." with no
  * delimiter cannot match.
+ *
+ * E is included because a minority of papers carry five options. Leaving it out
+ * did not merely lose the fifth option: an "E) ..." line failed to match here,
+ * fell through to the "continuation" branch below, and was appended to the text
+ * of option D — so the question survived with a corrupted D rather than being
+ * dropped, which is much harder to spot in review.
  */
-const OPTION_START = /^\s*[([{]?\s*([A-Da-d])\s*[)\].:]\s*(.+)$/;
+const OPTION_START = /^\s*[([{]?\s*([A-Ea-e])\s*[)\].:]\s*(.+)$/;
 
 /** Marker lines that introduce an answer key section. */
 const ANSWER_KEY_HEADER = /^\s*(answer\s*key|answers|correct\s*answers|marking\s*scheme|solutions)\b/i;
 
 /** "1. B" / "1) B" / "1 - B" / "1 B", possibly several on one line. */
-const ANSWER_KEY_ENTRY = /(\d{1,3})\s*[.)\]:-]?\s*[([{]?\s*([A-Da-d])\s*[)\]}.,;]?(?=\s|$)/g;
+const ANSWER_KEY_ENTRY = /(\d{1,3})\s*[.)\]:-]?\s*[([{]?\s*([A-Ea-e])\s*[)\]}.,;]?(?=\s|$)/g;
 
 /**
  * Join words hyphenated across a line break ("equa-\ntion" -> "equation") and
@@ -113,8 +128,16 @@ function normaliseLines(raw: string): string[] {
  * Parse an answer key. Accepts a block introduced by "ANSWERS"/"ANSWER KEY", and
  * also a bare trailing run of "n X" pairs, which is how many past papers end.
  * Returns a map of question number -> option letter.
+ *
+ * `headerRange` is the span of the document the header block consumed. The
+ * question scanner must skip it: the heading matches no question or option
+ * marker, so it used to be absorbed into the previous question's stem, and the
+ * key entries under it ("1. C") matched the question-number pattern and were
+ * parsed as option-less questions that were then discarded.
  */
-function parseAnswerKey(lines: string[]): { key: Map<number, string>; entries: number } {
+function parseAnswerKey(
+  lines: string[],
+): { key: Map<number, string>; entries: number; headerRange: { start: number; end: number } | null } {
   const key = new Map<number, string>();
 
   const collect = (from: number, to: number) => {
@@ -157,7 +180,14 @@ function parseAnswerKey(lines: string[]): { key: Map<number, string>; entries: n
     collect(tailStart, lines.length);
   }
 
-  return { key, entries: key.size };
+  return {
+    key,
+    entries: key.size,
+    headerRange:
+      headerIndex >= 0
+        ? { start: headerIndex, end: Math.min(lines.length, headerIndex + 60) }
+        : null,
+  };
 }
 
 /**
@@ -180,7 +210,7 @@ export function extractQuestionsFromText(raw: string): ExtractionResult {
     };
   }
 
-  const { key, entries: answerKeyEntries } = parseAnswerKey(lines);
+  const { key, entries: answerKeyEntries, headerRange } = parseAnswerKey(lines);
   const answerKeyFound = key.size > 0;
 
   interface Draft {
@@ -199,6 +229,16 @@ export function extractQuestionsFromText(raw: string): ExtractionResult {
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
+
+    // The answer section is not question content. Skipping the span the key
+    // parser consumed is what stops the heading being glued onto the previous
+    // question's stem and the key entries being read as option-less questions.
+    if (headerRange && i >= headerRange.start && i < headerRange.end) {
+      current = null;
+      currentOption = null;
+      continue;
+    }
+
     if (line.trim() === '' || isNoise(line)) {
       // Blank line just ends the current option paragraph; it does not end the
       // question, because stems and options are frequently separated by blanks.
@@ -246,6 +286,7 @@ export function extractQuestionsFromText(raw: string): ExtractionResult {
     const b = get('B');
     const c = get('C');
     const dd = get('D');
+    const ee = get('E');
 
     const stem = d.stem.join(' ').trim();
 
@@ -255,6 +296,9 @@ export function extractQuestionsFromText(raw: string): ExtractionResult {
       warnings.push(`Question ${d.number} (line ${d.line}) skipped: missing stem or options.`);
       continue;
     }
+    // E is NOT part of this check: four options is a complete question. Only A–D
+    // are required, so a paper without a fifth option is not reported as missing
+    // anything.
     if (!a || !b || !c || !dd) {
       warnings.push(`Question ${d.number} (line ${d.line}) was extracted with options missing — please complete them in review.`);
     }
@@ -267,6 +311,7 @@ export function extractQuestionsFromText(raw: string): ExtractionResult {
       option_b: b,
       option_c: c,
       option_d: dd,
+      option_e: ee,
       correct_option: fromKey,
       explanation: '',
       page_number: d.line,

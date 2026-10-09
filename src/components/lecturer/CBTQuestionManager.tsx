@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { Plus, Trash2, ArrowLeft, Save, Edit2, AlertCircle } from 'lucide-react';
+import { OPTION_LETTERS, hasOptionE } from '../../lib/questionOptions';
 
 interface Question {
   id: string;
@@ -10,6 +11,7 @@ interface Question {
   option_b: string;
   option_c: string;
   option_d: string;
+  option_e: string;
   correct_option: string;
   marks: number;
   topic?: string;
@@ -55,6 +57,7 @@ export default function CBTQuestionManager({ examId, onBack }: Props) {
       option_b: '',
       option_c: '',
       option_d: '',
+      option_e: '',
       correct_option: 'A',
       marks: 1
     });
@@ -62,7 +65,9 @@ export default function CBTQuestionManager({ examId, onBack }: Props) {
 
   const editQuestion = (q: Question) => {
     setEditingId(q.id);
-    setFormData({ ...q });
+    // Older papers predate the fifth option, so `option_e` can come back NULL.
+    // Normalise it to '' so the form state stays a string throughout.
+    setFormData({ ...q, option_e: q.option_e || '' });
   };
 
   const deleteQuestion = async (id: string) => {
@@ -81,6 +86,9 @@ export default function CBTQuestionManager({ examId, onBack }: Props) {
       option_b: formData.option_b,
       option_c: formData.option_c,
       option_d: formData.option_d,
+      // Empty string rather than undefined, so a four-option question clears the
+      // column instead of leaving the previous fifth option in place.
+      option_e: formData.option_e || '',
       correct_option: formData.correct_option,
       marks: formData.marks || 1
     };
@@ -139,7 +147,9 @@ export default function CBTQuestionManager({ examId, onBack }: Props) {
                 />
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {['a', 'b', 'c', 'd'].map(opt => (
+                {/* Nothing here is marked required, so E is simply left blank on
+                    the four-option papers most questions use. */}
+                {['a', 'b', 'c', 'd', 'e'].map(opt => (
                   <div key={opt}>
                     <label className="text-sm font-bold text-slate-300 block mb-1 uppercase">Option {opt}</label>
                     <input 
@@ -159,10 +169,9 @@ export default function CBTQuestionManager({ examId, onBack }: Props) {
                     onChange={e => setFormData({...formData, correct_option: e.target.value})}
                     className="w-full bg-[#020617] border border-slate-800 rounded-xl px-4 py-2 text-white focus:border-amber-500 outline-none"
                   >
-                    <option value="A">Option A</option>
-                    <option value="B">Option B</option>
-                    <option value="C">Option C</option>
-                    <option value="D">Option D</option>
+                    {OPTION_LETTERS.map(o => (
+                      <option key={o} value={o}>Option {o}</option>
+                    ))}
                   </select>
                 </div>
                 <div className="flex-1">
@@ -199,6 +208,11 @@ export default function CBTQuestionManager({ examId, onBack }: Props) {
               <div className={`p-2 rounded ${q.correct_option === 'B' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#020617] text-slate-400'}`}>B: {q.option_b}</div>
               <div className={`p-2 rounded ${q.correct_option === 'C' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#020617] text-slate-400'}`}>C: {q.option_c}</div>
               <div className={`p-2 rounded ${q.correct_option === 'D' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#020617] text-slate-400'}`}>D: {q.option_d}</div>
+              {/* Only five-option papers get an E row; an empty slot would just
+                  be dead space on the four-option majority. */}
+              {hasOptionE(q) && (
+                <div className={`p-2 rounded ${q.correct_option === 'E' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#020617] text-slate-400'}`}>E: {q.option_e}</div>
+              )}
             </div>
           </div>
         ))}

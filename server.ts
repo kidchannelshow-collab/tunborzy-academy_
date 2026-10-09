@@ -584,6 +584,9 @@ ${(content || '').substring(0, 10000)}`;
             option_b: q.option_b,
             option_c: q.option_c,
             option_d: q.option_d,
+            // '' for the four-option majority — the parser always sets it, so
+            // this never needs a fallback. See the option_d default below.
+            option_e: q.option_e || '',
             // Deliberately null when the PDF carried no answer key. The admin
             // sees it as needing review rather than being shown a guess.
             correct_option: q.correct_option,
@@ -640,6 +643,7 @@ ${(content || '').substring(0, 10000)}`;
                   option_b: q.option_b,
                   option_c: q.option_c,
                   option_d: q.option_d,
+                  option_e: q.option_e,
                 })),
                 { batchSize: EXPLANATION_BATCH_SIZE, onProgress: (m) => console.log(`[PDF Import] ${m}`) },
               );
@@ -805,7 +809,8 @@ ${(content || '').substring(0, 10000)}`;
                   "option_b": "Option B text",
                   "option_c": "Option C text",
                   "option_d": "Option D text",
-                  "correct_option": "A",
+                  "option_e": "Option E text — omit this key entirely when the question has only four options",
+                  "correct_option": "A, B, C, D or E",
                   "explanation": "Brief explanation why the option is correct."
                 }
               ]
@@ -931,9 +936,12 @@ ${(content || '').substring(0, 10000)}`;
           option_b: q.option_b || q.options?.[1] || '',
           option_c: q.option_c || q.options?.[2] || '',
           option_d: q.option_d || q.options?.[3] || '',
-          correct_option: ['A', 'B', 'C', 'D'].includes((q.correct_option || '').toUpperCase()) 
-            ? (q.correct_option || '').toUpperCase() 
-            : (typeof q.correct_answer === 'number' ? ['A', 'B', 'C', 'D'][q.correct_answer] || 'A' : 'A'),
+          // The fifth option, when the source has one — whether the model
+          // returned it as `option_e` or as a fifth entry in an `options` array.
+          option_e: q.option_e || q.options?.[4] || '',
+          correct_option: ['A', 'B', 'C', 'D', 'E'].includes((q.correct_option || '').toUpperCase())
+            ? (q.correct_option || '').toUpperCase()
+            : (typeof q.correct_answer === 'number' ? ['A', 'B', 'C', 'D', 'E'][q.correct_answer] || 'A' : 'A'),
           explanation: q.explanation || 'Requires admin review',
           topic: q.topic || 'General',
           difficulty: q.difficulty || 'medium',
@@ -1307,7 +1315,7 @@ Instructions:
 
       // Fetch all questions for those exams
       const { data: questions, error: qErr } = await sb.from('cbt_questions')
-        .select('id, exam_id, question_text, option_a, option_b, option_c, option_d, marks, topic, difficulty')
+        .select('id, exam_id, question_text, option_a, option_b, option_c, option_d, option_e, marks, topic, difficulty')
         .in('exam_id', examIds);
 
       if (qErr) throw qErr;
@@ -1423,6 +1431,7 @@ Instructions:
            option_b: q.option_b,
            option_c: q.option_c,
            option_d: q.option_d,
+           option_e: q.option_e,
            student_answer: studentAns,
            correct_option: q.correct_option,
            explanation: q.explanation,
@@ -1492,7 +1501,7 @@ Instructions:
       }
 
       const { data: questions, error: qErr } = await sb.from('cbt_questions')
-        .select('id, exam_id, question_text, option_a, option_b, option_c, option_d, marks, topic, difficulty')
+        .select('id, exam_id, question_text, option_a, option_b, option_c, option_d, option_e, marks, topic, difficulty')
         .eq('exam_id', examId);
       
       if (qErr) throw qErr;
@@ -1555,7 +1564,7 @@ Instructions:
       // correct_option is deliberately NOT selected — it is only read back at
       // grading time in /submit, so the answer key never reaches the browser.
       const { data: questions, error: qErr } = await sb.from('post_utme_questions')
-        .select('id, exam_id, question_text, option_a, option_b, option_c, option_d, marks, topic, difficulty')
+        .select('id, exam_id, question_text, option_a, option_b, option_c, option_d, option_e, marks, topic, difficulty')
         .eq('exam_id', examId);
 
       if (qErr) throw qErr;
@@ -1718,7 +1727,7 @@ Instructions:
       }
 
       let query = sb.from('utme_questions')
-        .select('id, question_text, option_a, option_b, option_c, option_d, difficulty, year')
+        .select('id, question_text, option_a, option_b, option_c, option_d, option_e, difficulty, year')
         .eq('subject_id', subjectId)
         .eq('status', 'published');
 
@@ -1835,6 +1844,7 @@ Instructions:
           option_b: q.option_b,
           option_c: q.option_c,
           option_d: q.option_d,
+          option_e: q.option_e,
           student_answer: studentAns || null,
           correct_option: q.correct_option,
           explanation: q.explanation,

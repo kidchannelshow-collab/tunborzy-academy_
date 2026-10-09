@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ArrowLeft, ArrowRight, Clock, Flag, Send, AlertTriangle } from 'lucide-react';
+import { OPTION_LETTERS, availableOptionLetters } from '../../lib/questionOptions';
 
 /**
  * The one CBT test-taking interface, shared by UTME, Post-UTME and Undergraduate.
@@ -103,7 +104,13 @@ export default function CBTExamShell({
       else if (e.key.toLowerCase() === 'f' && supportsFlags) onToggleFlag!(question.id);
       else {
         const letter = e.key.toUpperCase();
-        if (['A', 'B', 'C', 'D'].includes(letter)) onSelectOption(question.id, letter);
+        // Only letters this question actually carries. Keying 'E' on a
+        // four-option question would record an answer for an option that is not
+        // on screen.
+        if ((OPTION_LETTERS as readonly string[]).includes(letter) &&
+            availableOptionLetters(question).includes(letter as any)) {
+          onSelectOption(question.id, letter);
+        }
       }
     };
 
@@ -211,10 +218,12 @@ export default function CBTExamShell({
         )}
 
         <div className="space-y-3">
-          {(['A', 'B', 'C', 'D'] as const).map((opt) => {
+          {OPTION_LETTERS.map((opt) => {
             const text = question[`option_${opt.toLowerCase()}`];
-            // An option with no text is not rendered at all — some imported
-            // papers genuinely carry only three.
+            // An option with no text is not rendered at all. That covers two
+            // cases with one rule: some imported papers genuinely carry only
+            // three, and a five-option paper renders its E here without the
+            // four-option majority being given an empty fifth slot.
             if (!text) return null;
 
             const isSelected = answers[question.id] === opt;

@@ -24,6 +24,8 @@ interface Question {
   option_b: string;
   option_c: string;
   option_d: string;
+  /** Present only on papers that print a fifth option; the shell renders it when set. */
+  option_e?: string | null;
   marks: number;
   difficulty: string;
 }
@@ -40,6 +42,9 @@ interface TestResult {
     option_b: string;
     option_c: string;
     option_d: string;
+    /** Fifth option. Optional: most papers carry four, and the column is
+     *  nullable, so a four-option paper leaves it null. */
+    option_e?: string | null;
     student_answer: string;
     correct_option: string;
     explanation: string;
@@ -653,7 +658,11 @@ export default function PostUtmeDrillPage() {
               <p className="text-sm font-medium text-slate-200">{r.question_text}</p>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                {['A', 'B', 'C', 'D'].map(opt => {
+                {['A', 'B', 'C', 'D', 'E'].map(opt => {
+                  // Most papers carry four options; skip E when it has no text so
+                  // a four-option question is not given an empty fifth tile.
+                  if (opt === 'E' && !String(r.option_e ?? '').trim()) return null;
+
                   const optKey = `option_${opt.toLowerCase()}` as keyof typeof r;
                   const isUserAns = r.student_answer === opt;
                   const isCorrectAns = r.correct_option === opt;

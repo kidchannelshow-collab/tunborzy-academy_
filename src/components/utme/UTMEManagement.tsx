@@ -4,6 +4,7 @@ import { Plus, Edit2, Trash2, CheckCircle2, ShieldAlert, BookOpen, Layers, FileT
 import { supabase } from '../../supabaseClient';
 import { useProfile } from '../../lib/useProfile';
 import AdminPdfUploader from '../cbt/AdminPdfUploader';
+import { OPTION_LETTERS, availableOptionLetters } from '../../lib/questionOptions';
 
 /**
  * Import date/time, shown on a category card and in the question list.
@@ -60,6 +61,9 @@ export default function UTMEManagement() {
   const [optB, setOptB] = useState('');
   const [optC, setOptC] = useState('');
   const [optD, setOptD] = useState('');
+  // Optional fifth option. Most papers carry four, so this stays blank unless the
+  // question genuinely has an E.
+  const [optE, setOptE] = useState('');
   const [correctOpt, setCorrectOpt] = useState('A');
   const [explanation, setExplanation] = useState('');
   const [difficulty, setDifficulty] = useState('medium');
@@ -169,6 +173,9 @@ export default function UTMEManagement() {
         option_b: optB,
         option_c: optC,
         option_d: optD,
+        // Empty string rather than undefined, so a four-option question clears
+        // the column instead of leaving a stale fifth option behind.
+        option_e: optE || '',
         correct_option: correctOpt,
         explanation,
         difficulty,
@@ -310,6 +317,7 @@ export default function UTMEManagement() {
     setOptB('');
     setOptC('');
     setOptD('');
+    setOptE('');
     setCorrectOpt('A');
     setExplanation('');
     // Matches the initial state above — see the comment there. Resetting to
@@ -326,6 +334,8 @@ export default function UTMEManagement() {
     setOptB(q.option_b);
     setOptC(q.option_c);
     setOptD(q.option_d);
+    // NULL on rows written before the fifth option existed.
+    setOptE(q.option_e || '');
     setCorrectOpt(q.correct_option);
     setExplanation(q.explanation || '');
     setDifficulty(q.difficulty || 'medium');
@@ -917,7 +927,7 @@ export default function UTMEManagement() {
                       <p className="font-medium text-white text-sm">{q.question_text}</p>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                        {['A', 'B', 'C', 'D'].map((opt) => {
+                        {availableOptionLetters(q).map((opt) => {
                           const isCorrect = q.correct_option === opt;
                           return (
                             <div
@@ -1032,16 +1042,20 @@ export default function UTMEManagement() {
                   <label className="text-sm font-medium text-slate-400">Option D</label>
                   <input required type="text" value={optD} onChange={(e) => setOptD(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white mt-1" />
                 </div>
+                {/* Optional, unlike A–D above — a four-option question leaves it blank. */}
+                <div>
+                  <label className="text-sm font-medium text-slate-400">Option E (optional)</label>
+                  <input type="text" value={optE} onChange={(e) => setOptE(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white mt-1" />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-sm font-medium text-slate-400">Correct Answer</label>
                   <select value={correctOpt} onChange={(e) => setCorrectOpt(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white mt-1">
-                    <option value="A">Option A</option>
-                    <option value="B">Option B</option>
-                    <option value="C">Option C</option>
-                    <option value="D">Option D</option>
+                    {OPTION_LETTERS.map((o) => (
+                      <option key={o} value={o}>Option {o}</option>
+                    ))}
                   </select>
                 </div>
 

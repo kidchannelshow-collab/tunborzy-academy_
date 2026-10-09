@@ -54,6 +54,8 @@ export interface ExplanationQuestion {
   option_b: string;
   option_c: string;
   option_d: string;
+  /** Present only on papers that print a fifth option. */
+  option_e?: string | null;
   /** Only questions with a known key are sent for explanation. */
   correct_option: string | null;
 }
@@ -385,8 +387,12 @@ Rules:
  */
 function buildBatchPrompt(questions: Array<{ id: string; question: ExplanationQuestion }>): string {
   const blocks = questions.map(({ id, question }) => {
-    const option = (letter: 'a' | 'b' | 'c' | 'd') => {
+    // A–D are always present. E is rendered ONLY when the paper carried it:
+    // announcing a blank "E) (no text extracted)" would tell the model a fifth
+    // option exists and invite it to reason about nothing.
+    const option = (letter: 'a' | 'b' | 'c' | 'd' | 'e') => {
       const text = String((question as any)[`option_${letter}`] || '').trim();
+      if (letter === 'e' && !text) return null;
       return `${letter.toUpperCase()}) ${text || '(no text extracted)'}`;
     };
     return [
@@ -396,8 +402,9 @@ function buildBatchPrompt(questions: Array<{ id: string; question: ExplanationQu
       option('b'),
       option('c'),
       option('d'),
+      option('e'),
       `Official correct answer: ${String(question.correct_option || '').toUpperCase()}`,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   });
 
   return `${SYSTEM_INSTRUCTIONS}
@@ -496,7 +503,7 @@ export async function generateExplanations(
   const targets: Array<{ index: number; id: string; question: ExplanationQuestion }> = [];
   questions.forEach((question, index) => {
     const key = String(question?.correct_option || '').trim().toUpperCase();
-    if (!key || !['A', 'B', 'C', 'D'].includes(key)) {
+    if (!key || !['A', 'B', 'C', 'D', 'E'].includes(key)) {
       stats.skippedNoAnswer += 1;
       results.push({
         index,
@@ -668,6 +675,7 @@ export interface AnswerlessQuestion {
   option_b?: string | null;
   option_c?: string | null;
   option_d?: string | null;
+  option_e?: string | null;
 }
 
 export interface InferredAnswer {
@@ -693,15 +701,22 @@ export interface AnswerInferenceResult {
   stats: AnswerInferenceStats;
 }
 
-/** The only letters that are ever accepted back from the model. */
-const VALID_OPTIONS = ['A', 'B', 'C', 'D'];
+/**
+ * The only letters that are ever accepted back from the model.
+ *
+ * E is a valid key, but only for a question that actually HAS a fifth option —
+ * see the per-question check in `inferMissingAnswers`, which requires the letter
+ * to name an option the question carries. Accepting 'E' unconditionally here
+ * would let the model key a four-option question to a nonexistent choice.
+ */
+const VALID_OPTIONS = ['A', 'B', 'C', 'D', 'E'];
 
 const ANSWER_SYSTEM_INSTRUCTIONS = `You are an experienced examiner keying a multiple-choice question bank.
 
 You are given questions WITH their four options already extracted. Your ONLY job is to decide which option is correct.
 
 Rules:
-1. Choose exactly one of A, B, C or D. Never invent, reword or add an option.
+1. Choose exactly one of the options given. Most questions have four (A–D); a few carry a fifth (E). Never invent, reword or add an option, and never choose a letter that is not listed for that question.
 2. Use only the question and the options given. Never assume missing context, and never rely on a remembered "official" answer that the question does not support.
 3. If the question is ambiguous, corrupted, truncated, or the options do not include a defensible answer, set can_answer=false. Do NOT guess — an unanswered question is flagged for a human, which is always better than a wrong key.
 4. Echo the id exactly as given. Return one object per question, in the same order. Never merge or omit questions.
@@ -713,8 +728,13 @@ Rules:
  */
 function buildAnswerPrompt(questions: Array<{ id: string; question: AnswerlessQuestion }>): string {
   const blocks = questions.map(({ id, question }) => {
-    const option = (letter: 'a' | 'b' | 'c' | 'd') =>
-      `${letter.toUpperCase()}) ${String((question as any)[`option_${letter}`] || '').trim() || '(no text extracted)'}`;
+    const option = (letter: 'a' | 'b' | 'c' | 'd' | 'e') => {
+      const text = String((question as any)[`option_${letter}`] || '').trim();
+      // E is omitted when absent, so the model is never asked to choose from a
+      // blank fifth option. See the same rule in buildBatchPrompt.
+      if (letter === 'e' && !text) return null;
+      return `${letter.toUpperCase()}) ${text || '(no text extracted)'}`;
+    };
     return [
       `[id: ${id}]`,
       `Question: ${String(question.question_text || '').trim()}`,
@@ -722,7 +742,8 @@ function buildAnswerPrompt(questions: Array<{ id: string; question: AnswerlessQu
       option('b'),
       option('c'),
       option('d'),
-    ].join('\n');
+      option('e'),
+    ].filter(Boolean).join('\n');
   });
 
   // The exact reply shape has to be stated. The provider's JSON mode guarantees
@@ -751,6 +772,19 @@ ${blocks.join('\n\n')}
 
 Return JSON shaped exactly like this, with one entry in "answers" for EVERY question above, in the same order:
 ${JSON.stringify(shape)}`;
+}
+
+/**
+ * Whether a question actually carries an option with this letter.
+ *
+ * The guard that keeps 'E' honest: a four-option paper has no `option_e`, so a
+ * model answering 'E' has hallucinated a choice. Accepting it would write a key
+ * pointing at an option that does not exist — and because `correct_option` is a
+ * letter, not a foreign key, nothing downstream would catch it.
+ */
+function questionHasOption(question: AnswerlessQuestion, letter: string): boolean {
+  const value = (question as any)?.[`option_${letter.toLowerCase()}`];
+  return String(value ?? '').trim().length > 0;
 }
 
 /**
@@ -842,7 +876,10 @@ export async function inferMissingAnswers(
           if (index === undefined) continue;
 
           const letter = String(entry?.correct_option ?? '').trim().toUpperCase().slice(0, 1);
-          const usable = entry?.can_answer !== false && VALID_OPTIONS.includes(letter);
+          const usable =
+            entry?.can_answer !== false &&
+            VALID_OPTIONS.includes(letter) &&
+            questionHasOption(questions[index], letter);
           produced.set(id, {
             index,
             correct_option: usable ? letter : null,

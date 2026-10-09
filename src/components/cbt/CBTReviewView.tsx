@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { ArrowLeft, CheckCircle2, FileText, XCircle, ChevronLeft, ChevronRight } from 'lucide-react';
+import { availableOptionLetters } from '../../lib/questionOptions';
 import { supabase } from '../../supabaseClient';
 
 export default function CBTReviewView({ attemptId, onBack }: any) {
@@ -111,7 +112,9 @@ export default function CBTReviewView({ attemptId, onBack }: any) {
         )}
         
         <div className="space-y-3">
-          {['A', 'B', 'C', 'D'].map((letter) => {
+          {/* Only the letters this question has text for — so a five-option
+              paper reviews its E, and a four-option one has no empty fifth row. */}
+          {availableOptionLetters(q).map((letter) => {
             const optKey = 'option_' + letter.toLowerCase();
             const optText = q[optKey];
             if (!optText) return null;

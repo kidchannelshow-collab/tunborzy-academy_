@@ -35,7 +35,7 @@ async function loadSavedAttempt(attemptId: string) {
   if (questionIds.length > 0) {
     const { data: rows, error: qErr } = await supabase
       .from('utme_questions')
-      .select('id, question_text, option_a, option_b, option_c, option_d, correct_option, explanation')
+      .select('id, question_text, option_a, option_b, option_c, option_d, option_e, correct_option, explanation')
       .in('id', questionIds);
     if (qErr) throw qErr;
     const byId = new Map((rows || []).map((q: any) => [q.id, q]));
@@ -53,6 +53,7 @@ async function loadSavedAttempt(attemptId: string) {
           option_b: q.option_b,
           option_c: q.option_c,
           option_d: q.option_d,
+          option_e: q.option_e,
           student_answer: studentAnswer,
           correct_option: q.correct_option,
           explanation: q.explanation,
