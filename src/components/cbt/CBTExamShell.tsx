@@ -52,6 +52,13 @@ export interface CBTExamShellProps {
   /** Seconds remaining. The timer turns red and pulses under five minutes. */
   timeLeft: number;
 
+  /**
+   * Whether this is a timed sitting. Defaults to true. Set false for an untimed
+   * practice run: the countdown is then hidden entirely rather than rendered at
+   * 00:00, which would read as an expired exam.
+   */
+  timed?: boolean;
+
   submitting?: boolean;
   /** Label on the submit button; defaults to "Submit Exam". */
   submitLabel?: string;
@@ -77,6 +84,7 @@ export default function CBTExamShell({
   onNavigate,
   onSubmit,
   timeLeft,
+  timed = true,
   submitting = false,
   submitLabel = 'Submit Exam',
   flags,
@@ -156,16 +164,25 @@ export default function CBTExamShell({
         </div>
 
         <div className="flex items-center gap-3 sm:gap-4 shrink-0">
-          <div
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl font-mono font-bold text-sm border ${
-              timeIsLow
-                ? 'bg-rose-500/10 border-rose-500/40 text-rose-400 animate-pulse'
-                : 'bg-slate-900 border-slate-800 text-amber-400'
-            }`}
-            aria-label="Time remaining"
-          >
-            <Clock className="w-4 h-4" /> {formatTime(timeLeft)}
-          </div>
+          {timed ? (
+            <div
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl font-mono font-bold text-sm border ${
+                timeIsLow
+                  ? 'bg-rose-500/10 border-rose-500/40 text-rose-400 animate-pulse'
+                  : 'bg-slate-900 border-slate-800 text-amber-400'
+              }`}
+              aria-label="Time remaining"
+            >
+              <Clock className="w-4 h-4" /> {formatTime(timeLeft)}
+            </div>
+          ) : (
+            <div
+              className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm border bg-slate-900 border-slate-800 text-slate-400"
+              aria-label="Untimed practice"
+            >
+              <Clock className="w-4 h-4" /> Untimed
+            </div>
+          )}
           <button
             onClick={() => setShowConfirm(true)}
             disabled={submitting}

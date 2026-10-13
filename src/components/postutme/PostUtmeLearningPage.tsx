@@ -20,10 +20,12 @@ import StudentLessonViewer from '../materials/StudentLessonViewer';
  * The content level reuses `StudentLessonViewer` unchanged — it already renders
  * the `{ blocks, attachments, publishSettings }` JSON that `LessonEditor` writes.
  *
- * Note on progress: it is tracked for the current session only. The
- * `material_progress` table exists in `materials-schema.sql` but nothing else in
- * the app reads or writes it, and it is unverified against the live database, so
- * this page does not depend on it. Persisting progress is a follow-up.
+ * Note on progress: the `visited` set below only drives the in-page progress
+ * bars for THIS session. Durable completion now lives in `material_progress` and
+ * is read and written by `StudentLessonViewer` itself, so a lesson marked
+ * complete here persists and is still marked after a reload — the bars on this
+ * page are a session convenience layered on top of that, not the source of
+ * truth.
  */
 
 interface PostUtmeLearningPageProps {

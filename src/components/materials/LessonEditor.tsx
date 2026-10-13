@@ -341,10 +341,21 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
   /**
    * `silent` is set by the 15s draft autosave: it still writes, but skips the
    * `onSaved()` refresh so a background save does not churn the admin list.
+   *
+   * `settings` overrides the `publishSettings` captured by this closure. It
+   * exists for "Submit for Review", which must write the new status in the same
+   * save: `setPublishSettings` is asynchronous, so a `setTimeout(() => handleSave())`
+   * would run the *previous* closure and persist the old status, silently losing
+   * the submission.
    */
-  const handleSave = async (publish: boolean, { silent = false }: { silent?: boolean } = {}) => {
+  const handleSave = async (
+    publish: boolean,
+    { silent = false, settings }: { silent?: boolean; settings?: PublishSettings } = {}
+  ) => {
     if (!supabase) return;
     setIsSaving(true);
+
+    const effectiveSettings = settings ?? publishSettings;
 
     try {
       const { data: userData } = await supabase.auth.getUser();
@@ -358,7 +369,7 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
 
       const lessonData = {
         title: extractTitle(),
-        description: JSON.stringify({ blocks, attachments, publishSettings }),
+        description: JSON.stringify({ blocks, attachments, publishSettings: effectiveSettings }),
         portal,
         semester,
         course_code: courseCode,
@@ -386,7 +397,16 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
         const { error } = await supabase.from('materials').update(lessonData).eq('id', existingId);
         if (error) throw error;
       } else {
-        const { data, error } = await supabase.from('materials').insert([lessonData]).select('id').single();
+        // `order_index` is set on CREATE only. Every reader orders lessons by it,
+        // and this editor never wrote it, so new lessons arrived NULL and sorted
+        // last. Date.now() puts each new lesson after the ones already there,
+        // matching MaterialUploadModal; re-saving never rewrites it, so a lesson
+        // does not jump position on every edit.
+        const { data, error } = await supabase
+          .from('materials')
+          .insert([{ ...lessonData, order_index: Date.now() }])
+          .select('id')
+          .single();
         if (error) throw error;
         if (data?.id) createdLessonIdRef.current = data.id;
       }
@@ -420,8 +440,28 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
             <h2 className="text-lg font-bold text-white leading-tight">Lesson Editor</h2>
           </div>
         </div>
-        
 
+        {/* Section tabs. `activeTab` existed as state with the Materials and
+            Publishing Settings panels already written against it, but there was
+            no control to ever change it — so both panels were unreachable and a
+            lesson could never be given attachments or a publish status. */}
+        {!isPreviewMode && (
+          <div className="hidden md:flex items-center gap-1 bg-[#020617] border border-slate-800 rounded-xl p-1">
+            {([
+              ['content', 'Content'],
+              ['materials', 'Materials'],
+              ['settings', 'Settings'],
+            ] as const).map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setActiveTab(id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === id ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="flex items-center gap-3">
           <div className={`text-xs px-2 py-1 rounded-md font-medium border ${status === 'published' ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/10' : 'border-amber-500/30 text-amber-400 bg-amber-500/10'}`}>
@@ -445,14 +485,21 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
                   >
                     <Save size={16} /> Save Draft
                   </button>
-                  <button 
+                  <button
                     onClick={() => {
-                      setPublishSettings(prev => ({
-                        ...prev, 
+                      // Build the next settings and hand them straight to
+                      // handleSave, so the submission is persisted in one write
+                      // rather than raced against setState.
+                      const nextSettings: PublishSettings = {
+                        ...publishSettings,
                         status: 'Under Review',
-                        auditLogs: [{ action: 'Submitted for Review', by: profile?.full_name || 'Tutor', date: new Date().toISOString() }, ...(prev.auditLogs || [])]
-                      }));
-                      setTimeout(() => handleSave(false), 50); // wait for state
+                        auditLogs: [
+                          { action: 'Submitted for Review', by: profile?.full_name || 'Tutor', date: new Date().toISOString() },
+                          ...(publishSettings.auditLogs || []),
+                        ],
+                      };
+                      setPublishSettings(nextSettings);
+                      handleSave(false, { settings: nextSettings });
                     }}
                     disabled={isSaving || isUnderReview}
                     className="flex items-center gap-2 px-4 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 transition-colors text-sm font-bold"
@@ -508,7 +555,7 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
                 onDragStart={(e: any) => handleDragStart(e, index)}
                 onDragOver={(e: any) => handleDragOver(e)}
                 onDrop={(e: any) => handleDrop(e, index)}
-                className={`relative group rounded-2xl border ${isPreviewMode ? 'border-transparent' : 'border-slate-800/50 bg-[#0f172a]/50 p-5'} transition-all`}
+                className="relative group rounded-2xl border border-slate-800/50 bg-[#0f172a]/50 p-5 transition-all"
               >
                 {/* Drag Handle & Controls */}
                 {!isPreviewMode && (

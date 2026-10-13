@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Building2, BookOpen, Clock, Award, CheckCircle2, XCircle, ArrowLeft,
-  AlertCircle, Play, Calendar, Shuffle, ListTree, Sliders,
+  AlertCircle, Play, Calendar, Shuffle, ListTree, Sliders, Timer, Gauge,
 } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { POST_UTME_UNIVERSITY_CODE, POST_UTME_UNIVERSITY_NAME } from '../../lib/postUtme';
@@ -63,6 +63,15 @@ interface TestResult {
 const QUESTION_LIMITS = [10, 20, 50, 100] as const;
 
 /**
+ * The difficulty values `post_utme_questions.difficulty` actually carries.
+ *
+ * 'all' is the identity filter and is listed first so it is the default the
+ * student sees. The set is closed rather than free text because the column is a
+ * small enum written by the importer ('easy' | 'medium' | 'hard').
+ */
+const DIFFICULTIES = ['all', 'easy', 'medium', 'hard'] as const;
+
+/**
  * Every spelling this programme's papers may carry.
  *
  * Post-UTME serves one university, and `post_utme_exams.university` is free text
@@ -93,11 +102,34 @@ export default function PostUtmeDrillPage() {
   const [topics, setTopics] = useState<{ name: string; count: number }[]>([]);
   const [topicsLoading, setTopicsLoading] = useState(false);
 
+  /**
+   * Raw `{ topic, difficulty }` for every question in the open paper.
+   *
+   * Held so the setup screen can show how many questions the current filters
+   * actually match — the same live preview the UTME setup offers — and so the
+   * per-topic and per-difficulty counts are derived from one fetch rather than
+   * three. Only these two columns are selected; no option or answer text.
+   */
+  const [questionMeta, setQuestionMeta] = useState<{ topic: string; difficulty: string }[]>([]);
+
   // Setup choices.
   const [questionLimit, setQuestionLimit] = useState<number>(config.cbt.default_question_count);
   const [practiceMode, setPracticeMode] = useState<'random' | 'topic'>('random');
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
+  const [selectedDifficulty, setSelectedDifficulty] = useState<string>('all');
   const [userAdjusted, setUserAdjusted] = useState(false);
+
+  // Timed sitting. Mirrors the Undergraduate setup: the paper's own duration is
+  // the ceiling, and the student may shorten the sitting or drop the clock
+  // entirely. Untimed is a practice mode, not a way round a screening paper, so
+  // it only ever removes the countdown — grading is unchanged.
+  const [isTimed, setIsTimed] = useState(true);
+  const [durationMins, setDurationMins] = useState<number>(config.cbt.default_exam_duration_mins);
+  const [durationAdjusted, setDurationAdjusted] = useState(false);
+
+  // Flagged question ids, for the review navigator. Optional in the shell; the
+  // other two portals pass it, so Post-UTME does too.
+  const [flags, setFlags] = useState<Record<string, boolean>>({});
 
   const [questions, setQuestions] = useState<Question[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -120,6 +152,41 @@ export default function PostUtmeDrillPage() {
     if (userAdjusted) return;
     setQuestionLimit(nearestLimit(config.cbt.default_question_count));
   }, [config.cbt.default_question_count, userAdjusted]);
+
+  // Same contract for the clock: seed from the admin default once it is known,
+  // and never overwrite a duration the student has already chosen. Capped by the
+  // paper's own length when the setup screen renders.
+  useEffect(() => {
+    if (durationAdjusted) return;
+    setDurationMins(config.cbt.default_exam_duration_mins);
+  }, [config.cbt.default_exam_duration_mins, durationAdjusted]);
+
+  /** The difficulties this paper actually contains, in canonical order. */
+  const difficultyOptions = useMemo(() => {
+    const present = new Set(questionMeta.map((q) => String(q.difficulty || '').trim().toLowerCase()).filter(Boolean));
+    return DIFFICULTIES.filter((d) => d === 'all' || present.has(d));
+  }, [questionMeta]);
+
+  /**
+   * How many questions the current filters match.
+   *
+   * The student sees this before starting, so a topic + difficulty combination
+   * that yields nothing is obvious up front instead of arriving as an empty
+   * sitting. Mirrors UTMEDashboard's "matching questions" preview.
+   */
+  const availableCount = useMemo(() => {
+    const wantedTopic = practiceMode === 'topic' && selectedTopic ? selectedTopic.trim().toLowerCase() : null;
+    const wantedDifficulty = selectedDifficulty !== 'all' ? selectedDifficulty : null;
+
+    return questionMeta.filter((q) => {
+      const rawTopic = String(q.topic ?? '').trim();
+      const topic = !rawTopic || rawTopic.toLowerCase() === 'general' ? 'Uncategorized' : rawTopic;
+      if (wantedTopic && topic.toLowerCase() !== wantedTopic) return false;
+      const difficulty = String(q.difficulty ?? '').trim().toLowerCase();
+      if (wantedDifficulty && difficulty !== wantedDifficulty) return false;
+      return true;
+    }).length;
+  }, [questionMeta, practiceMode, selectedTopic, selectedDifficulty]);
 
   const fetchTodayStats = async () => {
     try {
@@ -208,17 +275,30 @@ export default function PostUtmeDrillPage() {
     setSelectedExam(exam);
     setPracticeMode('random');
     setSelectedTopic(null);
+    setSelectedDifficulty('all');
+    setIsTimed(true);
+    setDurationAdjusted(false);
+    setDurationMins(config.cbt.default_exam_duration_mins);
     setTestState('configuring');
     setTopicsLoading(true);
     try {
+      // `topic` and `difficulty` only — never an option column or the answer key.
       const { data, error } = await supabase
         .from('post_utme_questions')
-        .select('topic')
+        .select('topic, difficulty')
         .eq('exam_id', exam.id);
       if (error) throw error;
 
+      const rows = (data || []) as any[];
+      setQuestionMeta(
+        rows.map((row) => ({
+          topic: String(row?.topic ?? '').trim(),
+          difficulty: String(row?.difficulty ?? '').trim(),
+        })),
+      );
+
       const counts = new Map<string, number>();
-      (data || []).forEach((row: any) => {
+      rows.forEach((row) => {
         const raw = String(row?.topic ?? '').trim();
         const name = !raw || raw.toLowerCase() === 'general' ? 'Uncategorized' : raw;
         counts.set(name, (counts.get(name) || 0) + 1);
@@ -231,6 +311,7 @@ export default function PostUtmeDrillPage() {
     } catch (err) {
       console.error('Failed to load Post-UTME topics:', err);
       setTopics([]);
+      setQuestionMeta([]);
     } finally {
       setTopicsLoading(false);
     }
@@ -255,6 +336,9 @@ export default function PostUtmeDrillPage() {
           limit: questionLimit,
           mode: practiceMode,
           topic: practiceMode === 'topic' ? selectedTopic : undefined,
+          // 'all' means "no filter" and is sent as-is; the server treats it as
+          // absent so a paper with no difficulty recorded is never filtered out.
+          difficulty: selectedDifficulty,
         })
       });
 
@@ -262,14 +346,16 @@ export default function PostUtmeDrillPage() {
       if (!res.ok) throw new Error(data.error || 'Failed to start Post-UTME drill');
 
       if (!data.questions || data.questions.length === 0) {
-        alert('No questions matched your selection. Try a different mode or topic.');
+        alert('No questions matched your selection. Try a different mode, topic or difficulty.');
         return;
       }
 
       setQuestions(data.questions || []);
       setAttemptId(data.attemptId);
-      setTimeLeft(selectedExam.duration_minutes * 60);
+      // Untimed practice sends 0, which the shell renders as no countdown.
+      setTimeLeft(isTimed ? durationMins * 60 : 0);
       setAnswers({});
+      setFlags({});
       setCurrentIndex(0);
       setTestState('testing');
     } catch (err: any) {
@@ -454,7 +540,13 @@ export default function PostUtmeDrillPage() {
   // STEP 2 — pre-test setup (question limit, mode, topic)
   // ---------------------------------------------------------------------
   if (testState === 'configuring' && selectedExam) {
-    const canStart = practiceMode === 'random' || !!selectedTopic;
+    // Blocked when a topic is required but unchosen, or when the current filters
+    // provably match nothing. `questionMeta.length === 0` is treated as "unknown"
+    // rather than "empty", so a paper whose metadata failed to load can still be
+    // started instead of being locked out.
+    const canStart =
+      (practiceMode === 'random' || !!selectedTopic) &&
+      (availableCount > 0 || questionMeta.length === 0);
 
     return (
       <div className="max-w-3xl mx-auto px-4 py-8 space-y-6">
@@ -496,7 +588,9 @@ export default function PostUtmeDrillPage() {
             ))}
           </div>
           <p className="text-xs text-slate-500">
-            A shorter sitting is drawn at random from the whole paper.
+            {availableCount > 0
+              ? `${availableCount} question${availableCount === 1 ? '' : 's'} match your current filters. A shorter sitting is drawn at random from those.`
+              : 'No questions match the current filters — widen the topic or difficulty.'}
           </p>
         </div>
 
@@ -566,16 +660,89 @@ export default function PostUtmeDrillPage() {
           )}
         </div>
 
+        {/* Difficulty — the same filter the UTME setup offers. `all` is the
+            identity option and the default, so a paper with no difficulty
+            recorded behaves exactly as before. */}
+        {difficultyOptions.length > 1 && (
+          <div className="bg-[#0f172a] border border-slate-800 rounded-3xl p-6 space-y-4">
+            <h2 className="font-bold text-white flex items-center gap-2">
+              <Gauge size={18} className="text-purple-400" /> Difficulty
+            </h2>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {difficultyOptions.map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setSelectedDifficulty(d)}
+                  className={`py-3 rounded-xl font-bold text-sm border capitalize transition-all ${
+                    selectedDifficulty === d
+                      ? 'bg-amber-500/15 border-amber-500 text-amber-300'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600'
+                  }`}
+                >
+                  {d === 'all' ? 'All levels' : d}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Timed sitting — mirrors the Undergraduate setup. */}
+        <div className="bg-[#0f172a] border border-slate-800 rounded-3xl p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="font-bold text-white flex items-center gap-2">
+              <Timer size={18} className="text-purple-400" /> Timed session
+            </h2>
+            <button
+              onClick={() => setIsTimed((v) => !v)}
+              className={`w-12 h-6 rounded-full transition-colors relative ${isTimed ? 'bg-amber-500' : 'bg-slate-700'}`}
+              aria-pressed={isTimed}
+              aria-label="Toggle timed session"
+            >
+              <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${isTimed ? 'left-6' : 'left-0.5'}`} />
+            </button>
+          </div>
+
+          {isTimed ? (
+            <>
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-slate-400">Duration</span>
+                <span className="font-bold text-amber-300">{durationMins} minutes</span>
+              </div>
+              <input
+                type="range"
+                min={5}
+                // The paper's own length is the ceiling — a practice run may be
+                // shorter than the real screening, never longer.
+                max={Math.max(10, selectedExam.duration_minutes || 60)}
+                step={5}
+                value={durationMins}
+                onChange={(e) => { setDurationAdjusted(true); setDurationMins(Number(e.target.value)); }}
+                className="w-full accent-amber-500"
+              />
+            </>
+          ) : (
+            <p className="text-xs text-slate-500">
+              No countdown. Take as long as you need — grading is unchanged.
+            </p>
+          )}
+        </div>
+
         <button
           onClick={handleStartTest}
           disabled={!canStart || loading}
           className="w-full py-4 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl font-bold transition-colors flex items-center justify-center gap-2 shadow-lg shadow-purple-500/20"
         >
           <Play size={20} className="fill-current" />
-          {loading ? 'Preparing…' : `Start Drill · ${questionLimit} questions`}
+          {loading
+            ? 'Preparing…'
+            : `Start Drill · ${availableCount > 0 ? Math.min(questionLimit, availableCount) : questionLimit} questions`}
         </button>
         {!canStart && (
-          <p className="text-xs text-center text-rose-400">Choose a topic to start a topic drill.</p>
+          <p className="text-xs text-center text-rose-400">
+            {practiceMode === 'topic' && !selectedTopic
+              ? 'Choose a topic to start a topic drill.'
+              : 'No questions match the current filters. Widen the topic or difficulty.'}
+          </p>
         )}
       </div>
     );
@@ -599,7 +766,12 @@ export default function PostUtmeDrillPage() {
         onNavigate={setCurrentIndex}
         onSubmit={handleSubmitTest}
         timeLeft={timeLeft}
+        timed={isTimed}
         submitting={testState === 'submitting'}
+        flags={flags}
+        onToggleFlag={(questionId) =>
+          setFlags((prev) => ({ ...prev, [questionId]: !prev[questionId] }))
+        }
       />
     );
   }

@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'motion/react';
 import {
-  LayoutDashboard, BookOpen, FileText, BarChart2, Bell, LogOut, X, Users, Building2
+  LayoutDashboard, BookOpen, FileText, BarChart2, Bell, LogOut, X, Building2, PenTool
 } from 'lucide-react';
 
 interface LecturerSidebarProps {
@@ -11,28 +11,41 @@ interface LecturerSidebarProps {
   onNavigate: (view: string) => void;
   /**
    * View ids this lecturer may reach. The portal-scoped entries (UTME Manager,
-   * Post-UTME Manager) are omitted from `menuItems` when the lecturer has no
-   * courses in that portal, so the navigation cannot offer a surface they have
-   * no assignments for. Defaults to every entry for safety at the type level.
+   * Post-UTME Manager, Undergraduate Manager) are omitted from `menuItems` when
+   * the lecturer has no courses in that portal, so the navigation cannot offer a
+   * surface they have no assignments for. Defaults to every entry for safety at
+   * the type level.
    */
   allowedViews?: string[];
+  /** The portals this lecturer actually holds courses in, for the access card. */
+  portals?: string[];
 }
 
-export default function LecturerSidebar({ isOpen, setIsOpen, onLogout, currentView, onNavigate, allowedViews }: LecturerSidebarProps) {
+export default function LecturerSidebar({ isOpen, setIsOpen, onLogout, currentView, onNavigate, allowedViews, portals }: LecturerSidebarProps) {
   const menuItems = [
     // 'Material Center' and 'AI Tools' were removed from lecturer access by
     // request. The underlying features are untouched elsewhere: materials are
     // still uploaded per assigned course from Course Settings (LessonEditor and
     // MaterialUploadModal), and TunborzyAI is still reachable for Admin/Student.
+    //
+    // 'My Students' used to sit here and rendered `StudentInsights` — the same
+    // component the Analytics entry already opens — so it was a second door into
+    // one room. Removed; Analytics is the single entry point for student data.
     { icon: LayoutDashboard, label: 'Overview', id: 'overview' },
     { icon: BookOpen, label: 'Course Settings', id: 'courses' },
     { icon: FileText, label: 'CBT Manager', id: 'cbt' },
+    // One entry per portal the lecturer is actually assigned a course in. Each
+    // renders the same manager surface the Admin uses, scoped to this lecturer.
     { icon: FileText, label: 'UTME CBT Manager', id: 'utme-cbt', portal: 'UTME' },
     { icon: Building2, label: 'Post-UTME Manager', id: 'post-utme-cbt', portal: 'Post-UTME' },
-    { icon: Users, label: 'My Students', id: 'students' },
+    { icon: PenTool, label: 'Undergraduate Manager', id: 'ug-cbt', portal: 'Undergraduate' },
     { icon: BarChart2, label: 'Analytics', id: 'insights' },
     { icon: Bell, label: 'Announcements', id: 'announcements' },
   ].filter((item) => !allowedViews || allowedViews.includes(item.id));
+
+  // Shown in the access card so a lecturer can see at a glance which programmes
+  // they are on. Falls back to a neutral label while assignments are resolving.
+  const portalLabel = portals && portals.length > 0 ? portals.join(' · ') : 'No Courses Assigned';
 
   const handleNavigate = (id: string) => {
     onNavigate(id);
@@ -66,8 +79,8 @@ export default function LecturerSidebar({ isOpen, setIsOpen, onLogout, currentVi
 
       <div className="px-6 mb-6">
         <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4">
-          <p className="text-xs text-emerald-500 font-bold uppercase tracking-wider mb-1">Portal</p>
-          <p className="text-sm font-bold text-white">Lecturer Access</p>
+          <p className="text-xs text-emerald-500 font-bold uppercase tracking-wider mb-1">Assigned Programmes</p>
+          <p className="text-sm font-bold text-white">{portalLabel}</p>
         </div>
       </div>
 

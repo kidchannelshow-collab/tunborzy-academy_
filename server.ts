@@ -1522,7 +1522,7 @@ Instructions:
   //   submit -> { score, totalCorrect, totalWrong, totalQuestions, results }
   app.post('/api/post-utme/start', async (req, res) => {
     try {
-      const { examId, limit, mode, topic, topics } = req.body;
+      const { examId, limit, mode, topic, topics, difficulty } = req.body;
       const authHeader = req.headers.authorization;
       if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
 
@@ -1592,6 +1592,14 @@ Instructions:
       }
       // mode 'random' (or absent) keeps every question in the paper.
 
+      // `difficulty` mirrors /api/utme/start. 'all' (and absent) mean "no
+      // filter" — a paper whose questions predate the column must never be
+      // filtered down to nothing by a default value.
+      if (difficulty && difficulty !== 'all') {
+        const wanted = String(difficulty).trim().toLowerCase();
+        scoped = scoped.filter(q => q.difficulty && q.difficulty.trim().toLowerCase() === wanted);
+      }
+
       // Shuffled, so a repeat drill is not the same paper in the same order.
       scoped = [...scoped].sort(() => 0.5 - Math.random());
 
@@ -1610,14 +1618,41 @@ Instructions:
         return res.json({ attemptId: null, questions: [] });
       }
 
-      const { data: attempt, error: attemptErr } = await sb.from('post_utme_attempts').insert({
-        exam_id: examId,
-        user_id: userResponse.user.id,
-        status: 'in_progress',
-        answers: { question_ids: scoped.map(q => q.id) }
-      }).select().single();
+      // One sitting = one attempt row, exactly as /api/utme/start and
+      // /api/cbt/start do it. This endpoint used to INSERT unconditionally, so
+      // abandoning a drill and starting again — or any retry — left a trail of
+      // in_progress rows for a single sitting. An in-progress attempt for this
+      // student and paper is reused instead; a completed one is left alone so a
+      // genuine retake still creates a new row.
+      const { data: existingAttempt } = await sb.from('post_utme_attempts')
+        .select('id')
+        .eq('user_id', userResponse.user.id)
+        .eq('exam_id', examId)
+        .eq('status', 'in_progress')
+        .order('start_time', { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-      if (attemptErr) throw attemptErr;
+      let attempt;
+      if (existingAttempt) {
+        const { data: reused, error: reuseErr } = await sb.from('post_utme_attempts')
+          .update({ answers: { question_ids: scoped.map(q => q.id) } })
+          .eq('id', existingAttempt.id)
+          .select()
+          .single();
+        if (reuseErr) throw reuseErr;
+        attempt = reused;
+      } else {
+        const { data: inserted, error: attemptErr } = await sb.from('post_utme_attempts').insert({
+          exam_id: examId,
+          user_id: userResponse.user.id,
+          status: 'in_progress',
+          answers: { question_ids: scoped.map(q => q.id) }
+        }).select().single();
+
+        if (attemptErr) throw attemptErr;
+        attempt = inserted;
+      }
 
       console.log(
         `[Post-UTME Start] serving ${scoped.length}/${(questions || []).length} question(s) ` +

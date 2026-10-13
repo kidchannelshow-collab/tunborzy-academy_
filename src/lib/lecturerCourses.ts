@@ -15,19 +15,20 @@ import { useProfile } from './useProfile';
  * is exactly the bug class this module exists to avoid. Admin's Course
  * Management already writes `courses.lecturer_id`, and that path keeps working.
  *
- * UNDERGRADUATE IS NOT OFFERED
+ * WHICH PORTALS A LECTURER MAY HOLD
  *
- * A lecturer may be assigned UTME courses, Post-UTME courses, or both.
- * Undergraduate courses are filtered out here rather than at each call site, so
- * a lecturer cannot reach Undergraduate courses or materials through any
- * lecturer surface. When Undergraduate lecturer support is built, it is added by
- * widening LECTURER_PORTALS — one line, one place.
+ * All three. A lecturer may be assigned UTME courses, Post-UTME courses,
+ * Undergraduate courses, or any mix — the dashboard shows the manager for each
+ * portal they actually hold a course in, and nothing for the portals they do
+ * not. Undergraduate used to be filtered out here on the theory that it was
+ * admin-only; the filter is what made an assigned Undergraduate course invisible
+ * on every lecturer surface, so it is gone.
  *
  * The portal is read from `courses.portal`, the column Admin's Course Management
  * already writes and the value AdminPdfUploader and the material uploader
  * already branch on.
  */
-export const LECTURER_PORTALS = ['UTME', 'Post-UTME'] as const;
+export const LECTURER_PORTALS = ['UTME', 'Post-UTME', 'Undergraduate'] as const;
 
 export type LecturerPortal = (typeof LECTURER_PORTALS)[number];
 
@@ -47,10 +48,10 @@ export function isLecturerPortal(value: unknown): value is LecturerPortal {
 /**
  * Every portal an administrator may assign a course from.
  *
- * Deliberately wider than LECTURER_PORTALS: Admin assigns Undergraduate courses
- * too, they simply are not offered to the lecturer dashboard. Keeping the two
- * lists separate stops "what can be assigned" and "what a lecturer may reach"
- * from being conflated.
+ * Currently the same three as LECTURER_PORTALS — an admin can assign any course
+ * a lecturer may then reach. The two lists stay separate because they answer
+ * different questions ("what can be assigned" vs. "what a lecturer may reach")
+ * and are expected to diverge again if a portal becomes admin-only.
  */
 export const ASSIGNABLE_PORTALS = ['UTME', 'Post-UTME', 'Undergraduate'] as const;
 
@@ -139,12 +140,13 @@ export async function loadAssignedCourseIds(lecturerId: string): Promise<string[
 }
 
 export interface LecturerCoursesState {
-  /** The lecturer's own UTME / Post-UTME courses. Never Undergraduate. */
+  /** The lecturer's own courses, across every portal they are assigned. */
   courses: LecturerCourse[];
   /** The portals the lecturer actually has courses in. */
   portals: LecturerPortal[];
   hasUtme: boolean;
   hasPostUtme: boolean;
+  hasUndergraduate: boolean;
   loading: boolean;
   /** True until the profile AND the course list have both resolved. */
   ready: boolean;
@@ -241,6 +243,7 @@ export function useLecturerCourses(): LecturerCoursesState {
     portals,
     hasUtme: portals.includes('UTME'),
     hasPostUtme: portals.includes('Post-UTME'),
+    hasUndergraduate: portals.includes('Undergraduate'),
     loading,
     ready: !profileLoading && !loading,
     reload,

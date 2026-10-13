@@ -5,6 +5,7 @@ import CourseManagement from './lecturer/CourseManagement';
 import CBTManagement from './lecturer/CBTManagement';
 import UTMEManagement from './utme/UTMEManagement';
 import PostUtmeManagement from './postutme/PostUtmeManagement';
+import UndergraduateManager from './admin/UndergraduateManager';
 import StudentInsights from './lecturer/StudentInsights';
 import Announcements from './lecturer/Announcements';
 import LecturerProfile from './lecturer/LecturerProfile';
@@ -20,7 +21,7 @@ interface LecturerDashboardProps {
  * The portal-scoped entries are added below from the lecturer's own courses.
  */
 const BASE_VIEWS = [
-  'overview', 'courses', 'cbt', 'students', 'insights',
+  'overview', 'courses', 'cbt', 'insights',
   'announcements', 'profile',
 ];
 
@@ -28,21 +29,23 @@ export default function LecturerDashboard({ onLogout, onNavigate }: LecturerDash
   const [currentView, setCurrentView] = useState('overview');
   // `courses` / `loading` / `reload` are consumed by Course Settings and by the
   // hook's own realtime refresh, so only the derived flags are needed here.
-  const { hasUtme, hasPostUtme, ready } = useLecturerCourses();
+  const { hasUtme, hasPostUtme, hasUndergraduate, portals, ready } = useLecturerCourses();
 
   /**
    * The navigation a lecturer is entitled to.
    *
-   * `utme-cbt` and `post-utme-cbt` render the SAME managers the Admin uses, and
-   * they are the surfaces that carry the portal uploaders. They are offered only
-   * when the lecturer actually has a course in that portal — a lecturer with no
-   * Post-UTME assignment gets no Post-UTME entry, and nobody is offered the
-   * Undergraduate manager (the hook never returns Undergraduate courses).
+   * `utme-cbt`, `post-utme-cbt` and `ug-cbt` render the SAME managers the Admin
+   * uses, and they are the surfaces that carry the portal uploaders. Each is
+   * offered only when the lecturer actually has a course in that portal, so the
+   * menu is derived from their real assignments — a lecturer assigned only
+   * Post-UTME courses sees only the Post-UTME manager, and one with no
+   * Undergraduate courses never sees the Undergraduate manager.
    */
   const allowedViews = [
     ...BASE_VIEWS,
     ...(hasUtme ? ['utme-cbt'] : []),
     ...(hasPostUtme ? ['post-utme-cbt'] : []),
+    ...(hasUndergraduate ? ['ug-cbt'] : []),
   ];
 
   /**
@@ -68,8 +71,9 @@ export default function LecturerDashboard({ onLogout, onNavigate }: LecturerDash
         return hasUtme ? <UTMEManagement /> : <Overview />;
       case 'post-utme-cbt':
         return hasPostUtme ? <PostUtmeManagement /> : <Overview />;
+      case 'ug-cbt':
+        return hasUndergraduate ? <UndergraduateManager /> : <Overview />;
       case 'insights': // Analytics
-      case 'students': // Student Management
         return <StudentInsights />;
       case 'announcements':
         return <Announcements />;
@@ -87,6 +91,7 @@ export default function LecturerDashboard({ onLogout, onNavigate }: LecturerDash
       onNavigate={setCurrentView}
       onLogout={onLogout}
       allowedViews={allowedViews}
+      portals={portals}
     >
       {renderView()}
     </LecturerDashboardLayout>

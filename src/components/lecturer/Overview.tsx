@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { BookOpen, FileText, Library, Users, Calendar } from 'lucide-react';
+import { BookOpen, FileText, Library, Users, Calendar, UploadCloud, Clock } from 'lucide-react';
 import { useProfile } from '../../lib/useProfile';
 import { supabase } from '../../supabaseClient';
 
@@ -15,8 +15,22 @@ export default function Overview() {
     courses: 0,
     active_courses: 0,
     cbt: 0,
-    students: 0
+    students: 0,
+    materials: 0,
+    published: 0,
+    uploadsThisWeek: 0,
   });
+
+  /**
+   * Teaching time on this lecturer's own exams over the last seven days.
+   *
+   * This is the closest thing to a real "work" metric the data supports: it is
+   * the wall-clock time students spent sitting this lecturer's CBT papers, which
+   * is what the lecturer actually produced. It is deliberately NOT a count of
+   * logins — nothing on the platform records lecturer presence, and an invented
+   * number is worse than an absent one.
+   */
+  const [teachingMinutes, setTeachingMinutes] = useState(0);
 
   const [recentActivities, setRecentActivities] = useState<any[]>([]);
 
@@ -39,22 +53,55 @@ export default function Overview() {
     if (!supabase || !profile) return;
     try {
       const [coursesRes, cbtRes, enrollmentsRes] = await Promise.all([
-        supabase.from('courses').select('id, is_archived').eq('lecturer_id', profile.id),
+        supabase.from('courses').select('id, is_archived, course_code').eq('lecturer_id', profile.id),
         // lecturer/CBTManagement.tsx writes cbt_exams with `created_by`, not
         // `lecturer_id` (no such column), so counting by lecturer_id always
         // reported 0 exams.
         supabase.from('cbt_exams').select('id', { count: 'exact', head: true }).eq('created_by', profile.id),
         supabase.from('course_enrollments').select('student_id, courses!inner(lecturer_id)').eq('courses.lecturer_id', profile.id)
       ]);
-      
+
       const courses = coursesRes.data || [];
       const uniqueStudentCount = new Set((enrollmentsRes.data || []).map((e: any) => e.student_id)).size;
-      
+
+      // Materials are scoped by COURSE CODE, not by `materials.lecturer_id`.
+      // The column is written by LessonEditor/MaterialUploadModal but is not part
+      // of any materials DDL in this repo, so filtering on it is one migration
+      // away from an empty list. The lecturer's own course codes are the join the
+      // rest of the dashboard already uses (Course Settings, the student viewer).
+      const courseCodes = Array.from(
+        new Set(courses.map((c: any) => c.course_code).filter(Boolean))
+      ) as string[];
+
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 7);
+      const weekAgoIso = weekAgo.toISOString();
+
+      let materialTotal = 0;
+      let materialPublished = 0;
+      let materialThisWeek = 0;
+
+      if (courseCodes.length > 0) {
+        const { data: mats } = await supabase
+          .from('materials')
+          .select('id, is_published, created_at')
+          .in('course_code', courseCodes);
+
+        for (const m of (mats || []) as any[]) {
+          materialTotal++;
+          if (m.is_published) materialPublished++;
+          if (m.created_at && new Date(m.created_at).toISOString() >= weekAgoIso) materialThisWeek++;
+        }
+      }
+
       setStats({
         courses: courses.length,
         active_courses: courses.filter(c => !c.is_archived).length,
         cbt: cbtRes.count || 0,
-        students: uniqueStudentCount
+        students: uniqueStudentCount,
+        materials: materialTotal,
+        published: materialPublished,
+        uploadsThisWeek: materialThisWeek,
       });
 
       // Average student performance across this lecturer's exams. Scoped by
@@ -68,10 +115,11 @@ export default function Overview() {
 
       if (examIds.length === 0) {
         setAvgPerformance({ avg: 0, sittings: 0 });
+        setTeachingMinutes(0);
       } else {
         const { data: sittings } = await supabase
           .from('cbt_attempts')
-          .select('score')
+          .select('score, start_time, end_time')
           .eq('status', 'completed')
           .not('score', 'is', null)
           .in('exam_id', examIds);
@@ -83,6 +131,23 @@ export default function Overview() {
           avg: scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0,
           sittings: scores.length,
         });
+
+        // Teaching minutes over the last 7 days, summed from the sittings that
+        // carry both timestamps. A row missing either is skipped rather than
+        // counted as zero-length, so an incomplete attempt never drags the
+        // average down.
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        let minutes = 0;
+        for (const s of (sittings || []) as any[]) {
+          if (!s.start_time || !s.end_time) continue;
+          const start = new Date(s.start_time).getTime();
+          const end = new Date(s.end_time).getTime();
+          if (Number.isNaN(start) || Number.isNaN(end) || end < start) continue;
+          if (start < weekAgo.getTime()) continue;
+          minutes += (end - start) / 60000;
+        }
+        setTeachingMinutes(Math.round(minutes));
       }
     } catch (e) {
       console.error(e);
@@ -101,11 +166,25 @@ export default function Overview() {
     } catch (err) { console.error(err); }
   };
 
+  /** Human duration for the teaching-time tile, e.g. 135 -> "2h 15m". */
+  const formatDuration = (mins: number) => {
+    if (!mins) return '0m';
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
+
   const STATS_DATA = [
     { label: 'Total Courses', value: stats.courses, icon: BookOpen, color: 'text-indigo-500', bg: 'bg-indigo-500/10' },
     { label: 'Active Courses', value: stats.active_courses, icon: Library, color: 'text-emerald-500', bg: 'bg-emerald-500/10' },
     { label: 'Total Students', value: stats.students, icon: Users, color: 'text-blue-500', bg: 'bg-blue-500/10' },
     { label: 'CBT Exams Created', value: stats.cbt, icon: FileText, color: 'text-cyan-500', bg: 'bg-cyan-500/10' },
+    // Real activity rather than a restatement of the course list: what this
+    // lecturer has actually produced, and what students have actually done with
+    // it in the last seven days.
+    { label: 'Materials Published', value: `${stats.published} / ${stats.materials}`, icon: UploadCloud, color: 'text-violet-500', bg: 'bg-violet-500/10' },
+    { label: 'Uploaded This Week', value: stats.uploadsThisWeek, icon: UploadCloud, color: 'text-amber-500', bg: 'bg-amber-500/10' },
+    { label: 'Teaching Time (7d)', value: formatDuration(teachingMinutes), icon: Clock, color: 'text-rose-500', bg: 'bg-rose-500/10' },
   ];
 
   return (

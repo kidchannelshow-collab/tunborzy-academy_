@@ -18,9 +18,15 @@ interface StudentLessonViewerProps {
   material: any;
   onClose: () => void;
   onNavigateToSibling?: (siblingId: string) => void;
+  /**
+   * Lets the caller keep its own lesson list in step when completion is toggled
+   * here, without refetching. Optional: callers that do not render a list (the
+   * admin review preview, say) simply omit it.
+   */
+  onProgressChange?: (materialId: string, completed: boolean) => void;
 }
 
-export default function StudentLessonViewer({ material, onClose, onNavigateToSibling }: StudentLessonViewerProps) {
+export default function StudentLessonViewer({ material, onClose, onNavigateToSibling, onProgressChange }: StudentLessonViewerProps) {
   const [blocks, setBlocks] = useState<any[]>([]);
   const [attachments, setAttachments] = useState<any[]>([]);
   const [publishSettings, setPublishSettings] = useState<any>(null);
@@ -28,6 +34,8 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
   const [siblings, setSiblings] = useState<any[]>([]);
   
   const [isCompleted, setIsCompleted] = useState(false);
+  const [progressSaving, setProgressSaving] = useState(false);
+  const [progressError, setProgressError] = useState(false);
   const [isBookmarked, setIsBookmarked] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
@@ -70,6 +78,12 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
     if (containerRef.current) {
       containerRef.current.scrollTo(0, 0);
     }
+    // Reset completion the moment a different lesson is shown. The parent swaps
+    // only the `material` prop and keeps this component mounted, so without this
+    // the previous lesson's "Completed" leaked into the next one until the row
+    // for the new lesson came back.
+    setIsCompleted(false);
+    setProgressError(false);
     try {
       if (material.description) {
         const parsed = JSON.parse(material.description);
@@ -88,7 +102,75 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
     }
     
     fetchContext();
+    loadProgress();
   }, [material]);
+
+  /**
+   * Read this user's saved completion for this lesson.
+   *
+   * `material_progress` carries a UNIQUE(user_id, material_id) constraint and a
+   * "Users manage own data progress" policy, so `user_id` here is the signed-in
+   * auth id — the same value `profiles.id` holds.
+   */
+  const loadProgress = async () => {
+    if (!supabase || !material?.id) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data, error } = await supabase
+        .from('material_progress')
+        .select('is_completed')
+        .eq('user_id', user.id)
+        .eq('material_id', material.id)
+        .maybeSingle();
+      if (error) throw error;
+      setIsCompleted(!!data?.is_completed);
+    } catch (e) {
+      // Not fatal: the lesson still reads fine, it just shows as not-completed.
+      console.error('[lesson progress] could not load saved progress:', e);
+    }
+  };
+
+  /**
+   * Persist the completion toggle to the backend.
+   *
+   * Optimistic so the button responds instantly, then reverted with a visible
+   * message if the write fails — a completion that silently vanishes on reload
+   * is exactly the bug this replaces, so a failure must not look like success.
+   */
+  const toggleCompleted = async () => {
+    const next = !isCompleted;
+    setIsCompleted(next);
+    setProgressError(false);
+
+    if (!supabase || !material?.id) return;
+    setProgressSaving(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not signed in');
+
+      const { error } = await supabase
+        .from('material_progress')
+        .upsert(
+          {
+            user_id: user.id,
+            material_id: material.id,
+            is_completed: next,
+            progress_percent: next ? 100 : 0,
+            last_accessed_at: new Date().toISOString(),
+          },
+          { onConflict: 'user_id,material_id' }
+        );
+      if (error) throw error;
+      onProgressChange?.(material.id, next);
+    } catch (e) {
+      console.error('[lesson progress] could not save progress:', e);
+      setIsCompleted(!next);
+      setProgressError(true);
+    } finally {
+      setProgressSaving(false);
+    }
+  };
 
   const fetchContext = async () => {
     if (!supabase) return;
@@ -180,10 +262,15 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
       case 'main':
       case 'summary':
         return (
-          // `.lesson-content` sets typography but no colour or size, so these
-          // utilities stay in charge of the reading size and text colour.
-          <div className="lesson-content text-lg text-slate-300 font-body mb-10">
-            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{block.content}</ReactMarkdown>
+          // Same card container the editor shows around each block (dark panel,
+          // rounded border), so the reading view is the preview the author saw
+          // rather than an undifferentiated run of plain text.
+          <div className="bg-[#0f172a]/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-8 shadow-lg">
+            {/* `.lesson-content` sets typography but no colour or size, so these
+                utilities stay in charge of the reading size and text colour. */}
+            <div className="lesson-content text-lg text-slate-300 font-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{block.content}</ReactMarkdown>
+            </div>
           </div>
         );
       case 'example':
@@ -259,7 +346,7 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
         );
       case 'references':
         return (
-          <div className="mt-16 pt-8 border-t border-slate-800">
+          <div className="bg-[#0f172a]/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-8">
             <h4 className="text-slate-400 font-bold uppercase tracking-widest text-sm mb-4">References</h4>
             <div className="lesson-content text-sm text-slate-500">
               <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{block.content}</ReactMarkdown>
@@ -531,13 +618,21 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
           {/* Lesson Completion & Actions */}
           <div className="mt-24 pt-12 border-t border-slate-800">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-6">
-              <button
-                onClick={() => setIsCompleted(!isCompleted)}
-                className={`flex items-center gap-3 px-8 py-4 rounded-2xl font-bold transition-all w-full sm:w-auto justify-center ${isCompleted ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-[0_0_20px_rgba(16,185,129,0.1)]' : 'bg-sky-600 hover:bg-sky-500 text-white shadow-xl hover:shadow-sky-500/20'}`}
-              >
-                {isCompleted ? <CheckCircle size={20} className="fill-emerald-400 text-emerald-950" /> : <CheckCircle size={20} />}
-                {isCompleted ? 'Completed' : 'Mark as Completed'}
-              </button>
+              <div className="w-full sm:w-auto">
+                <button
+                  onClick={toggleCompleted}
+                  disabled={progressSaving}
+                  className={`flex items-center gap-3 px-8 py-4 rounded-2xl font-bold transition-all w-full justify-center disabled:opacity-70 ${isCompleted ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-[0_0_20px_rgba(16,185,129,0.1)]' : 'bg-sky-600 hover:bg-sky-500 text-white shadow-xl hover:shadow-sky-500/20'}`}
+                >
+                  {isCompleted ? <CheckCircle size={20} className="fill-emerald-400 text-emerald-950" /> : <CheckCircle size={20} />}
+                  {isCompleted ? 'Completed' : 'Mark as Completed'}
+                </button>
+                {progressError && (
+                  <p className="mt-2 text-xs text-rose-400 text-center sm:text-left">
+                    Could not save your progress. Please check your connection and try again.
+                  </p>
+                )}
+              </div>
 
               <div className="flex items-center gap-3 w-full sm:w-auto">
                 <button

@@ -9,9 +9,11 @@ interface LecturerDashboardLayoutProps {
   onNavigate: (view: string) => void;
   /** Portal-scoped view ids the lecturer may reach; forwarded to the sidebar. */
   allowedViews?: string[];
+  /** The portals the lecturer holds courses in; forwarded to the sidebar card. */
+  portals?: string[];
 }
 
-export default function LecturerDashboardLayout({ children, onLogout, currentView, onNavigate, allowedViews }: LecturerDashboardLayoutProps) {
+export default function LecturerDashboardLayout({ children, onLogout, currentView, onNavigate, allowedViews, portals }: LecturerDashboardLayoutProps) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   return (
@@ -23,6 +25,7 @@ export default function LecturerDashboardLayout({ children, onLogout, currentVie
         currentView={currentView}
         onNavigate={onNavigate}
         allowedViews={allowedViews}
+        portals={portals}
       />
       
       <div className="flex-1 min-w-0 lg:pl-72 flex flex-col min-h-[100dvh]">

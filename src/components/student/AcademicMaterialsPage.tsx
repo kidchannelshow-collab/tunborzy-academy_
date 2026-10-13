@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { BookOpen, Layers, FileText, ArrowLeft, Loader2, PlayCircle, BookMarked, ChevronRight, GraduationCap, ArrowRight, AlertCircle, Sparkles, TrendingUp } from 'lucide-react';
+import { BookOpen, Layers, FileText, ArrowLeft, Loader2, PlayCircle, BookMarked, ChevronRight, GraduationCap, ArrowRight, AlertCircle, Sparkles, TrendingUp, CheckCircle2 } from 'lucide-react';
 import DashboardLayout from '../dashboard/DashboardLayout';
 import { supabase } from '../../supabaseClient';
 import { useProfile } from '../../lib/useProfile';
@@ -32,6 +32,12 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [selectedMaterial, setSelectedMaterial] = useState<any | null>(null);
   const [topicStatuses, setTopicStatuses] = useState<Record<string, { status: 'Needs Review' | 'Practice Recommended' | 'Good' }>>({});
+  /**
+   * Material ids this student has completed, read from `material_progress`.
+   * Keyed by id and only holding completed rows, so `completedMaterialIds[id]`
+   * is a cheap truthiness test in the list.
+   */
+  const [completedMaterialIds, setCompletedMaterialIds] = useState<Record<string, boolean>>({});
   const [cbtModalTopic, setCbtModalTopic] = useState<string | null>(null);
   const [cbtView, setCbtView] = useState<'exam' | 'result'>('exam');
   const [cbtAttemptId, setCbtAttemptId] = useState<string | null>(null);
@@ -204,6 +210,11 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
         }));
         setTopics(grouped);
 
+        // Completion for the rows just listed, so a lesson the student finished
+        // in an earlier session is marked from the moment the list paints. The
+        // write side lives in StudentLessonViewer.
+        void loadMaterialProgress(visible.map((m: any) => m.id));
+
         // Evaluate weak topic statuses based on actual CBT performance data
         if (profile?.id) {
           const { data: attempts } = await supabase
@@ -291,6 +302,31 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
     setSelectedMaterial(material);
   };
 
+  /** Read this student's completion for the given lessons. */
+  const loadMaterialProgress = async (materialIds: string[]) => {
+    if (!supabase || !profile?.id || materialIds.length === 0) {
+      setCompletedMaterialIds({});
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from('material_progress')
+        .select('material_id, is_completed')
+        .eq('user_id', profile.id)
+        .in('material_id', materialIds);
+      if (error) throw error;
+
+      const next: Record<string, boolean> = {};
+      for (const row of (data || []) as any[]) {
+        if (row.is_completed) next[row.material_id] = true;
+      }
+      setCompletedMaterialIds(next);
+    } catch (e) {
+      // Non-fatal: the library still lists every lesson, just without the ticks.
+      console.error('[materials] could not load completion state:', e);
+    }
+  };
+
   if (selectedMaterial) {
     return (
       <StudentLessonViewer 
@@ -309,6 +345,14 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
              }
            }
         }}
+        onProgressChange={(materialId, completed) =>
+          setCompletedMaterialIds(prev => {
+            const next = { ...prev };
+            if (completed) next[materialId] = true;
+            else delete next[materialId];
+            return next;
+          })
+        }
       />
     );
   }
@@ -552,22 +596,32 @@ export default function AcademicMaterialsPage({ onLogout, onNavigate }: Academic
                               </div>
                             </div>
                             <div className="divide-y divide-slate-800/50">
-                              {topic.materials.map((material, mIndex) => (
+                              {topic.materials.map((material, mIndex) => {
+                                const isDone = !!completedMaterialIds[material.id];
+                                return (
                                 <button
                                   key={material.id}
                                   onClick={() => openLesson(topic.name, material)}
                                   className="w-full text-left p-5 hover:bg-slate-800/50 transition-colors flex items-center gap-4 group"
                                 >
-                                  <div className="w-10 h-10 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center group-hover:scale-110 transition-transform">
-                                    <PlayCircle size={20} />
+                                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform ${isDone ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                                    {isDone ? <CheckCircle2 size={20} /> : <PlayCircle size={20} />}
                                   </div>
                                   <div className="flex-1">
                                     <h5 className="font-semibold text-slate-200 group-hover:text-white transition-colors">{material.title || `Lesson ${mIndex + 1}`}</h5>
-                                    <p className="text-xs text-slate-500 mt-1">Read lesson material</p>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                      {isDone ? 'Completed' : 'Read lesson material'}
+                                    </p>
                                   </div>
+                                  {isDone && (
+                                    <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-bold border border-emerald-500/20">
+                                      <CheckCircle2 size={13} /> Done
+                                    </span>
+                                  )}
                                   <ChevronRight className="text-slate-600 group-hover:text-amber-400 transition-colors" />
                                 </button>
-                              ))}
+                                );
+                              })}
                             </div>
                           </div>
                         );
