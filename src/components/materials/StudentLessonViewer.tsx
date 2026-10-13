@@ -37,6 +37,7 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
   const [progressSaving, setProgressSaving] = useState(false);
   const [progressError, setProgressError] = useState(false);
   const [isBookmarked, setIsBookmarked] = useState(false);
+  const [bookmarkSaving, setBookmarkSaving] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [launchingCbt, setLaunchingCbt] = useState(false);
@@ -83,6 +84,7 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
     // the previous lesson's "Completed" leaked into the next one until the row
     // for the new lesson came back.
     setIsCompleted(false);
+    setIsBookmarked(false);
     setProgressError(false);
     try {
       if (material.description) {
@@ -103,7 +105,74 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
     
     fetchContext();
     loadProgress();
+    loadBookmark();
   }, [material]);
+
+  /**
+   * Read this user's saved-material flag for this lesson.
+   *
+   * The bookmark was local state only, so it lit up on click and was gone after
+   * a reload — the same "looks saved, isn't" class as the completion bug this
+   * file already fixed. `saved_materials` is the table the Resource Library
+   * writes and reads (UNIQUE user_id + material_id + collection_name, with a
+   * "Users manage own data saves" policy), so both surfaces now agree.
+   */
+  const loadBookmark = async () => {
+    if (!supabase || !material?.id) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data } = await supabase
+        .from('saved_materials')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('material_id', material.id)
+        .maybeSingle();
+      setIsBookmarked(!!data);
+    } catch (e) {
+      // Non-fatal: the lesson reads fine, it just shows as unsaved.
+      console.error('[lesson bookmark] could not load saved state:', e);
+    }
+  };
+
+  /**
+   * Persist the bookmark toggle.
+   *
+   * Optimistic, then reverted on failure — a bookmark that silently vanishes on
+   * reload is exactly the bug this replaces.
+   */
+  const toggleBookmark = async () => {
+    const next = !isBookmarked;
+    setIsBookmarked(next);
+
+    if (!supabase || !material?.id) return;
+    setBookmarkSaving(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not signed in');
+
+      if (next) {
+        const { error } = await supabase
+          .from('saved_materials')
+          .insert({ user_id: user.id, material_id: material.id });
+        // 23505 is the unique-constraint violation: the row is already there,
+        // which is the state we wanted anyway.
+        if (error && error.code !== '23505') throw error;
+      } else {
+        const { error } = await supabase
+          .from('saved_materials')
+          .delete()
+          .eq('user_id', user.id)
+          .eq('material_id', material.id);
+        if (error) throw error;
+      }
+    } catch (e) {
+      console.error('[lesson bookmark] could not save bookmark:', e);
+      setIsBookmarked(!next);
+    } finally {
+      setBookmarkSaving(false);
+    }
+  };
 
   /**
    * Read this user's saved completion for this lesson.
@@ -437,7 +506,12 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
               </button>
               <span className="flex items-center gap-1.5"><BookOpen size={14} /> {getEstimatedTime()} MIN READ</span>
             </div>
-            <button onClick={() => setIsBookmarked(!isBookmarked)} className={`p-2 rounded-xl transition-colors ${isBookmarked ? 'bg-amber-500/10 text-amber-400' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`} title="Bookmark">
+            <button
+              onClick={toggleBookmark}
+              disabled={bookmarkSaving}
+              className={`p-2 rounded-xl transition-colors disabled:opacity-70 ${isBookmarked ? 'bg-amber-500/10 text-amber-400' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+              title={isBookmarked ? 'Remove bookmark' : 'Bookmark'}
+            >
               <Bookmark size={18} fill={isBookmarked ? "currentColor" : "none"} />
             </button>
             <button onClick={handleCopyLink} className="p-2 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition-colors relative" title="Share">

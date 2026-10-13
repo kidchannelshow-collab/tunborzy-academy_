@@ -12,6 +12,7 @@ import LessonEditor from '../materials/LessonEditor';
 import {
   POST_UTME_UNIVERSITY_CODE,
   POST_UTME_UNIVERSITY_NAME,
+  isUnilorinPaper,
 } from '../../lib/postUtme';
 import { OPTION_LETTERS, availableOptionLetters } from '../../lib/questionOptions';
 
@@ -895,7 +896,9 @@ export default function PostUtmeManagement() {
                           )}
                         </p>
                         <p className="text-[11px] text-slate-500 mt-1">
-                          {activeExam.is_published
+                          {!isUnilorinPaper(activeExam.university)
+                            ? `Filed under "${activeExam.university}", which this programme does not serve — publish it and no student will see it. Re-file it under ${POST_UTME_UNIVERSITY_NAME}.`
+                            : activeExam.is_published
                             ? 'Published — students can take this paper in CBT.'
                             : 'Unpublished — hidden from students, still editable here.'}
                         </p>

@@ -355,7 +355,44 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
     if (!supabase) return;
     setIsSaving(true);
 
-    const effectiveSettings = settings ?? publishSettings;
+    /**
+     * The publish intent and the publication status are ONE decision, not two.
+     *
+     * Two buttons can publish, and before this they disagreed:
+     *
+     *   "Publish Lesson"     wrote `is_published: true` but left the embedded
+     *                        `publishSettings.status` at 'Draft', so the lesson
+     *                        was live for students yet hidden from the Resource
+     *                        Library, which filters on that status.
+     *   "Save Publishing     read the editor's `status` state, which the status
+     *    Settings"           radio in the Settings tab never updates — so
+     *                        choosing "Published" and saving wrote
+     *                        `is_published: false` and the lesson stayed hidden.
+     *
+     * Now: picking 'Published' publishes, the Publish button records it, and
+     * every other status (Draft / Under Review / Archived / Hidden) leaves the
+     * row unpublished. `is_published` stays the column the student readers gate
+     * on; `status` is kept in step with it so the surfaces that read the status
+     * agree.
+     */
+    const chosen = settings ?? publishSettings;
+    const shouldPublish = publish || chosen.status === 'Published';
+
+    const effectiveSettings: PublishSettings =
+      publish && chosen.status !== 'Published'
+        ? {
+            ...chosen,
+            status: 'Published',
+            auditLogs: [
+              {
+                action: 'Published',
+                by: profile?.full_name || 'Staff',
+                date: new Date().toISOString(),
+              },
+              ...(chosen.auditLogs || []),
+            ],
+          }
+        : chosen;
 
     try {
       const { data: userData } = await supabase.auth.getUser();
@@ -375,7 +412,7 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
         course_code: courseCode,
         topic,
         file_type: 'lesson',
-        is_published: publish,
+        is_published: shouldPublish,
         lecturer_id: userId,
         lecturer_name: lecturerName,
         // `materials.file_url` is NOT NULL with no default. A lesson carries its
@@ -411,7 +448,10 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
         if (data?.id) createdLessonIdRef.current = data.id;
       }
 
-      setStatus(publish ? 'published' : 'draft');
+      setStatus(shouldPublish ? 'published' : 'draft');
+      // Mirror the status the write actually persisted, so the badge and the
+      // Settings tab stop showing the value the author typed over.
+      setPublishSettings(effectiveSettings);
       if (!silent) onSaved();
     } catch (error: any) {
       // Surfaced rather than swallowed: a failed save used to look identical to
@@ -539,7 +579,11 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
         )}
         {activeTab === 'settings' && (
           <div className="max-w-3xl mx-auto">
-            <LessonPublishingSettings publishSettings={publishSettings} setPublishSettings={setPublishSettings} onSave={() => handleSave(status === 'published')} />
+            {/* Publishing intent comes from the settings document, so nothing is
+                forced to `publish: true` here. Passing the editor's own `status`
+                state was the bug: the status radio never updated that state, so
+                choosing "Published" saved `is_published: false`. */}
+            <LessonPublishingSettings publishSettings={publishSettings} setPublishSettings={setPublishSettings} onSave={() => handleSave(false)} />
           </div>
         )}
         <div className={`max-w-3xl mx-auto space-y-6 ${activeTab !== 'content' ? 'hidden' : ''}`}>
@@ -694,7 +738,11 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
 
                 {block.type === 'video' && (
                   <div className="space-y-3">
-                    {block.content && block.content.includes('youtube.com') || block.content.includes('youtu.be') ? (
+                    {/* Parenthesised on purpose: `a && b || c` binds as
+                        `(a && b) || c`, so an empty `content` fell through to
+                        `block.content.includes(...)` on the right of the `||`
+                        and threw on a block whose content had not been set. */}
+                    {(block.content && (block.content.includes('youtube.com') || block.content.includes('youtu.be'))) ? (
                       <div className="aspect-video w-full rounded-xl overflow-hidden border border-slate-800 bg-[#020617]">
                         <iframe 
                           width="100%" 

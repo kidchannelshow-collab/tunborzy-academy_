@@ -66,7 +66,14 @@ export default function CBTExamTaker({ examId, attemptId, onFinish, onCancel, cu
           const data = await res.json();
           if (data.questions) setQuestions(data.questions);
           if (data.attemptId) setActualAttemptId(data.attemptId);
-          setTimeLeft(customConfig.time * 60);
+          // `timed: false` is the Undergraduate setup's untimed-practice switch.
+          // It was passed into `customConfig` and then ignored here, so the
+          // toggle did nothing: the sitting still ran the full countdown. An
+          // untimed run sends 0, which the shell renders as "Untimed" instead of
+          // a countdown. The `duration` computed above carries the 30-minute
+          // fallback, where `customConfig.time * 60` would have produced NaN for
+          // a caller that omitted `time`.
+          setTimeLeft(customConfig.timed === false ? 0 : duration);
         } else if (examId) {
           const res = await fetch(`/api/cbt/exam/${examId}`, {
             headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
@@ -176,6 +183,7 @@ export default function CBTExamTaker({ examId, attemptId, onFinish, onCancel, cu
       onNavigate={setCurrentIdx}
       onSubmit={submitExam}
       timeLeft={timeLeft}
+      timed={customConfig?.timed !== false}
       submitting={submitting}
       flags={flags}
       onToggleFlag={(questionId) => setFlags(prev => ({ ...prev, [questionId]: !prev[questionId] }))}

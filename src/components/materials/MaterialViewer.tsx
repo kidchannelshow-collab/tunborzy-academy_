@@ -1,7 +1,7 @@
 import StudentLessonViewer from "./StudentLessonViewer";
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, type ReactNode } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowLeft, ZoomIn, ZoomOut, Maximize, Bookmark, Edit3, X, Save } from 'lucide-react';
+import { ArrowLeft, ZoomIn, ZoomOut, Maximize, Bookmark, Edit3, X, Save, ExternalLink, Link2 } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useProfile } from '../../lib/useProfile';
 
@@ -98,7 +98,183 @@ export default function MaterialViewer({ material, onClose }: MaterialViewerProp
     }
   };
 
-  
+  /** `'#'` is the app's "no file" sentinel — see LessonEditor's file_url write. */
+  const hasRealFile = !!material.file_url && material.file_url !== '#';
+
+  /**
+   * The card container every non-media preview shares.
+   *
+   * Same shape as the lesson editor's block cards — dark panel, rounded-3xl,
+   * slate border — so a preview reads as one organised surface instead of a
+   * bare panel. Reported as plain JSX rather than
+   * `<PreviewCard/>`: a component defined during render is a new component type
+   * on every pass, so React would remount its whole subtree each time.
+   */
+  const previewCard = (body: ReactNode, title?: string) => (
+    <div className="bg-[#0f172a] border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl max-w-3xl mx-auto">
+      {title && (
+        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-5">{title}</h3>
+      )}
+      {body}
+    </div>
+  );
+
+  /** The "we hold this file but the browser cannot render it" card. */
+  const fileHandoffCard = (label: string) =>
+    previewCard(
+      <div className="flex flex-col items-center text-center gap-5 py-6">
+        <div className="w-20 h-20 rounded-2xl bg-slate-800/70 border border-slate-700 flex items-center justify-center text-3xl">
+          📄
+        </div>
+        <div>
+          <h3 className="text-xl font-bold text-white mb-1.5">{material.title}</h3>
+          <p className="text-sm text-slate-400 max-w-md">
+            {label} files open in their own viewer rather than in this panel.
+          </p>
+          <p className="text-xs text-slate-500 mt-3">
+            {[material.subject, material.course_code, material.lecturer_name].filter(Boolean).join(' · ')}
+          </p>
+        </div>
+        {hasRealFile ? (
+          <a
+            href={material.file_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-6 py-3 rounded-2xl bg-amber-500 hover:bg-amber-400 text-amber-950 font-bold text-sm flex items-center gap-2 transition-colors"
+          >
+            <ExternalLink size={16} /> Open {label}
+          </a>
+        ) : (
+          <p className="text-xs text-slate-500">No file is attached to this material yet.</p>
+        )}
+      </div>,
+      'Material preview',
+    );
+
+  /**
+   * The preview body.
+   *
+   * Every branch renders real content where the browser can show it, and a
+   * styled hand-off card where it cannot. This replaced a placeholder: the pdf
+   * branch drew a fake white page of grey bars ("PDF Preview (Simulated for
+   * Demo)"), and the ppt/doc/zip/link/image branch printed "cannot be viewed
+   * directly in the browser" — including for `image`, which browsers render
+   * perfectly well. A `video` material matched neither branch and rendered an
+   * entirely blank panel.
+   */
+  const renderPreview = () => {
+    const type = String(material.file_type || '').toLowerCase();
+
+    if (type === 'pdf') {
+      if (!hasRealFile) return fileHandoffCard('PDF');
+      return (
+        <div
+          className="rounded-3xl overflow-hidden border border-slate-800 bg-white mx-auto transition-all duration-300 h-[70vh] w-full max-w-4xl"
+          style={{ transform: `scale(${zoomLevel / 100})`, transformOrigin: 'top center' }}
+        >
+          <iframe src={material.file_url} title={material.title} className="w-full h-full" />
+        </div>
+      );
+    }
+
+    if (type === 'image') {
+      if (!hasRealFile) return fileHandoffCard('Image');
+      return previewCard(
+        <img
+          src={material.file_url}
+          alt={material.title}
+          className="w-full max-h-[70vh] object-contain rounded-2xl bg-[#020617] border border-slate-800"
+        />,
+        'Image',
+      );
+    }
+
+    if (type === 'video') {
+      if (!hasRealFile) return fileHandoffCard('Video');
+      const isYouTube = material.file_url.includes('youtube.com') || material.file_url.includes('youtu.be');
+      const isVimeo = material.file_url.includes('vimeo.com');
+      return previewCard(
+        <div className="aspect-video w-full rounded-2xl overflow-hidden border border-slate-800 bg-black">
+          {isYouTube ? (
+            <iframe
+              src={`https://www.youtube.com/embed/${material.file_url.split('v=')[1]?.split('&')[0] || material.file_url.split('youtu.be/')[1]}`}
+              title={material.title}
+              className="w-full h-full"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+            />
+          ) : isVimeo ? (
+            <iframe
+              src={`https://player.vimeo.com/video/${material.file_url.split('/').pop()}`}
+              title={material.title}
+              className="w-full h-full"
+              allow="autoplay; fullscreen; picture-in-picture"
+              allowFullScreen
+            />
+          ) : (
+            <video controls className="w-full h-full object-contain bg-black" src={material.file_url} />
+          )}
+        </div>,
+        'Video',
+      );
+    }
+
+    if (type === 'audio') {
+      return previewCard(
+        <div className="flex flex-col items-center text-center gap-6 py-4">
+          <div className="w-24 h-24 bg-indigo-500/20 rounded-full flex items-center justify-center">
+            <div className="w-16 h-16 bg-indigo-500 rounded-full animate-pulse" />
+          </div>
+          <div>
+            <h3 className="text-xl font-bold text-white mb-1">{material.title}</h3>
+            <p className="text-slate-400 text-sm">{material.lecturer_name || material.subject}</p>
+          </div>
+          {hasRealFile ? (
+            <audio
+              controlsList="noview"
+              onContextMenu={(e) => e.preventDefault()}
+              src={material.file_url}
+              controls
+              className="w-full custom-audio"
+            />
+          ) : (
+            <p className="text-xs text-slate-500">No audio file is attached yet.</p>
+          )}
+        </div>,
+        'Audio',
+      );
+    }
+
+    if (type === 'link') {
+      return previewCard(
+        <div className="flex flex-col items-center text-center gap-5 py-6">
+          <div className="w-16 h-16 rounded-2xl bg-cyan-500/15 border border-cyan-500/25 flex items-center justify-center text-cyan-400">
+            <Link2 size={28} />
+          </div>
+          <div>
+            <h3 className="text-xl font-bold text-white mb-1.5">{material.title}</h3>
+            <p className="text-sm text-slate-400 break-all max-w-md">{material.file_url}</p>
+          </div>
+          {hasRealFile && (
+            <a
+              href={material.file_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-6 py-3 rounded-2xl bg-amber-500 hover:bg-amber-400 text-amber-950 font-bold text-sm flex items-center gap-2 transition-colors"
+            >
+              <ExternalLink size={16} /> Open link
+            </a>
+          )}
+        </div>,
+        'External resource',
+      );
+    }
+
+    // ppt / doc / zip / anything unrecognised — held, but not renderable here.
+    return fileHandoffCard(type ? type.toUpperCase() : 'File');
+  };
+
+
   if (material.file_type === 'lesson') {
     return <StudentLessonViewer material={material} onClose={onClose} />;
   }
@@ -154,53 +330,8 @@ export default function MaterialViewer({ material, onClose }: MaterialViewerProp
       
       {/* Content Area */}
       <div className="flex-1 flex overflow-hidden relative">
-        <div className="flex-1 bg-[#020617] relative overflow-auto flex items-center justify-center p-4">
-          
-          {material.file_type === 'pdf' && (
-            <div 
-              className="bg-white rounded shadow-2xl transition-all duration-300 flex flex-col"
-              style={{ width: `${(zoomLevel / 100) * 100}%`, maxWidth: '900px', minHeight: `${(zoomLevel / 100) * 800}px` }}
-            >
-              <div className="p-12 border-b border-gray-200 text-center">
-                <h1 className="text-3xl font-bold text-gray-900 mb-4">{material.title}</h1>
-                <h2 className="text-xl text-gray-600 mb-8">{material.lecturer_name || material.subject}</h2>
-                <div className="space-y-6 max-w-2xl mx-auto text-left opacity-30 pointer-events-none">
-                  <div className="h-4 bg-gray-400 rounded w-full"></div>
-                  <div className="h-4 bg-gray-400 rounded w-5/6"></div>
-                  <div className="h-4 bg-gray-400 rounded w-4/6"></div>
-                  <div className="h-4 bg-gray-400 rounded w-full mt-8"></div>
-                  <div className="h-4 bg-gray-400 rounded w-full"></div>
-                  <div className="h-4 bg-gray-400 rounded w-3/4"></div>
-                  <div className="h-4 bg-gray-400 rounded w-full"></div>
-                  <div className="h-4 bg-gray-400 rounded w-5/6"></div>
-                </div>
-                <div className="mt-12 text-slate-500 font-medium">
-                  PDF Preview (Simulated for Demo)
-                </div>
-              </div>
-            </div>
-          )}
-
-          {material.file_type === 'audio' && (
-            <div className="w-full max-w-md bg-slate-900 rounded-2xl p-8 border border-slate-800 shadow-2xl text-center">
-               <div className="w-24 h-24 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
-                 <div className="w-16 h-16 bg-indigo-500 rounded-full animate-pulse"></div>
-               </div>
-               <h3 className="text-xl font-bold text-white mb-2">{material.title}</h3>
-               <p className="text-slate-400 mb-8">{material.lecturer_name}</p>
-               <audio controlsList="noview" onContextMenu={(e) => e.preventDefault()} src={material.file_url} controls className="w-full custom-audio" />
-            </div>
-          )}
-
-          {['ppt', 'doc', 'zip', 'link', 'image'].includes(material.file_type) && (
-            <div className="w-full max-w-md bg-slate-900 rounded-2xl p-8 border border-slate-800 shadow-2xl text-center">
-               <div className="text-6xl mb-6">📄</div>
-               <h3 className="text-xl font-bold text-white mb-2">{material.title}</h3>
-               <p className="text-slate-400 mb-8">This file type ({material.file_type}) cannot be viewed directly in the browser.</p>
-               
-            </div>
-          )}
-
+        <div className="flex-1 bg-[#020617] relative overflow-auto p-4 sm:p-6">
+          {renderPreview()}
         </div>
 
         {/* Notes Panel */}

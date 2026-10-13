@@ -1,11 +1,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Building2, BookOpen, Clock, Award, CheckCircle2, XCircle, ArrowLeft,
-  AlertCircle, Play, Calendar, Shuffle, ListTree, Sliders, Timer, Gauge,
+  AlertCircle, Play, Calendar, Shuffle, ListTree, Sliders, Timer, Gauge, MinusCircle,
 } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
-import { POST_UTME_UNIVERSITY_CODE, POST_UTME_UNIVERSITY_NAME } from '../../lib/postUtme';
+import {
+  POST_UTME_UNIVERSITY_NAME,
+  isUnilorinPaper,
+} from '../../lib/postUtme';
 import { usePlatformConfig } from '../../lib/platformSettings';
+import { useProfile } from '../../lib/useProfile';
+import { notificationService } from '../../lib/notificationService';
 import CBTExamShell from '../cbt/CBTExamShell';
 
 interface PostUtmeExam {
@@ -35,6 +40,10 @@ interface TestResult {
   totalCorrect: number;
   totalWrong: number;
   totalQuestions: number;
+  /** Questions the student left blank. Returned by /api/post-utme/submit. */
+  totalUnanswered?: number;
+  /** Seconds on task, derived server-side from the attempt's own timestamps. */
+  timeUsedSeconds?: number | null;
   results: {
     id: string;
     question_text: string;
@@ -72,21 +81,14 @@ const QUESTION_LIMITS = [10, 20, 50, 100] as const;
 const DIFFICULTIES = ['all', 'easy', 'medium', 'hard'] as const;
 
 /**
- * Every spelling this programme's papers may carry.
- *
- * Post-UTME serves one university, and `post_utme_exams.university` is free text
- * written by the admin importer, so the lock has to match the name and the code
- * in either case rather than one exact string.
+ * Post-UTME serves the University of Ilorin only. The rule itself lives in
+ * `lib/postUtme`, shared with the staff manager, so the manager cannot badge a
+ * paper "Live" that this list would hide.
  */
-const UNILORIN_ALIASES = new Set([
-  POST_UTME_UNIVERSITY_CODE.toLowerCase(),
-  POST_UTME_UNIVERSITY_NAME.toLowerCase(),
-  'unilorin',
-  'university of ilorin',
-]);
 
 export default function PostUtmeDrillPage() {
   const { config } = usePlatformConfig();
+  const { profile } = useProfile();
 
   /**
    * The Post-UTME session, opened or closed by an admin in System Settings →
@@ -154,8 +156,10 @@ export default function PostUtmeDrillPage() {
   }, [config.cbt.default_question_count, userAdjusted]);
 
   // Same contract for the clock: seed from the admin default once it is known,
-  // and never overwrite a duration the student has already chosen. Capped by the
-  // paper's own length when the setup screen renders.
+  // and never overwrite a duration the student has already chosen. The value is
+  // additionally clamped to the paper's own length on open (see handleOpenSetup)
+  // — the range input clamps its thumb, but state seeded above the paper's
+  // duration would otherwise hand the student a longer clock than the paper has.
   useEffect(() => {
     if (durationAdjusted) return;
     setDurationMins(config.cbt.default_exam_duration_mins);
@@ -166,6 +170,27 @@ export default function PostUtmeDrillPage() {
     const present = new Set(questionMeta.map((q) => String(q.difficulty || '').trim().toLowerCase()).filter(Boolean));
     return DIFFICULTIES.filter((d) => d === 'all' || present.has(d));
   }, [questionMeta]);
+
+  /**
+   * The sitting lengths this paper can actually fill.
+   *
+   * The four fixed lengths used to be offered unconditionally, so a 12-question
+   * paper still advertised "100" — a button that silently yielded 12, and a
+   * control that contradicted its own label. An empty metadata list means the
+   * paper's size is unknown, so every length is offered rather than none.
+   */
+  const offeredLimits = useMemo(() => {
+    if (questionMeta.length === 0) return [...QUESTION_LIMITS];
+    const fits = QUESTION_LIMITS.filter((n) => n <= questionMeta.length);
+    return fits.length > 0 ? fits : [QUESTION_LIMITS[0]];
+  }, [questionMeta]);
+
+  // Keep the selection on a length this paper offers — e.g. after switching from
+  // a 300-question paper where 100 was chosen to a 12-question one.
+  useEffect(() => {
+    if (offeredLimits.includes(questionLimit as any)) return;
+    setQuestionLimit(offeredLimits[offeredLimits.length - 1]);
+  }, [offeredLimits, questionLimit]);
 
   /**
    * How many questions the current filters match.
@@ -196,7 +221,14 @@ export default function PostUtmeDrillPage() {
       const { data: attempts } = await supabase
         .from('post_utme_attempts')
         .select('score, start_time, end_time, post_utme_exams(subject, university)')
-        .eq('user_id', user.id);
+        .eq('user_id', user.id)
+        // Completed sittings only. `post_utme_attempts` gets an `in_progress` row
+        // the moment a drill starts, and without this filter starting a drill and
+        // abandoning it counted as a CBT taken and — because `score` defaults to
+        // 0 — dragged the day's average down. Every other reader of this table
+        // (UTMEDashboard, PostUtmeManagement, Analytics, PerformanceAnalytics)
+        // filters on `completed`; this was the only one that did not.
+        .eq('status', 'completed');
 
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -278,7 +310,17 @@ export default function PostUtmeDrillPage() {
     setSelectedDifficulty('all');
     setIsTimed(true);
     setDurationAdjusted(false);
-    setDurationMins(config.cbt.default_exam_duration_mins);
+    // The paper's own length is the ceiling — a practice run may be shorter than
+    // the real screening, never longer. The range input below clamps its thumb,
+    // but state seeded above the paper's duration still produced a longer
+    // countdown than the paper allows (admin default 30 min on a 20-minute paper
+    // gave the student 30:00). Clamping the state closes that gap.
+    const paperMinutes = Number(exam.duration_minutes) || 0;
+    setDurationMins(
+      paperMinutes > 0
+        ? Math.min(config.cbt.default_exam_duration_mins, paperMinutes)
+        : config.cbt.default_exam_duration_mins,
+    );
     setTestState('configuring');
     setTopicsLoading(true);
     try {
@@ -385,8 +427,24 @@ export default function PostUtmeDrillPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to submit Post-UTME exam');
 
+      // Mirrors UTMEExamTaker and CBTExamTaker, which both raise a result
+      // notification on a successful submit. Post-UTME raised none, so a
+      // completed Post-UTME drill never appeared in the student's bell.
+      if (profile?.id) {
+        await notificationService.notifyUser({
+          userId: profile.id,
+          title: 'Post-UTME Drill Completed',
+          message: `${selectedExam?.title || 'Post-UTME paper'}: you scored ${data.score}%.`,
+          type: 'result',
+          link: '/utme',
+        });
+      }
+
       setTestResult(data);
       setTestState('results');
+      // Re-read the day's totals so the tiles reflect the sitting just finished
+      // rather than the state they were loaded with on mount.
+      void fetchTodayStats();
     } catch (err: any) {
       alert('Error submitting test: ' + err.message);
       setTestState('testing');
@@ -400,11 +458,7 @@ export default function PostUtmeDrillPage() {
    * university rule and hiding them would remove papers that currently work.
    * Everything else must match Unilorin by name or code.
    */
-  const filteredExams = exams.filter((exam) => {
-    const value = String(exam.university ?? '').trim().toLowerCase();
-    if (!value) return true;
-    return UNILORIN_ALIASES.has(value);
-  });
+  const filteredExams = exams.filter((exam) => isUnilorinPaper(exam.university));
 
   // ---------------------------------------------------------------------
   // STEP 1 — choose a paper
@@ -573,7 +627,7 @@ export default function PostUtmeDrillPage() {
             <Sliders size={18} className="text-purple-400" /> Number of questions
           </h2>
           <div className="grid grid-cols-4 gap-3">
-            {QUESTION_LIMITS.map((n) => (
+            {offeredLimits.map((n) => (
               <button
                 key={n}
                 onClick={() => { setUserAdjusted(true); setQuestionLimit(n); }}
@@ -789,7 +843,7 @@ export default function PostUtmeDrillPage() {
           <h1 className="text-3xl font-extrabold text-white">Post-UTME Drill Completed!</h1>
           <p className="text-slate-400 text-sm">{selectedExam?.title}</p>
 
-          <div className="grid grid-cols-3 gap-4 max-w-lg mx-auto py-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-2xl mx-auto py-4">
             <div className="p-4 bg-slate-900/60 rounded-2xl">
               <span className="text-2xl font-black text-purple-400">{testResult.score}%</span>
               <p className="text-xs text-slate-400 mt-1 font-medium">Final Score</p>
@@ -802,14 +856,38 @@ export default function PostUtmeDrillPage() {
               <span className="text-2xl font-black text-rose-400">{testResult.totalWrong}</span>
               <p className="text-xs text-slate-400 mt-1 font-medium">Incorrect</p>
             </div>
+            {/* Unanswered is its own outcome. Folding a blank into "Incorrect"
+                told a student they got a question wrong when they never
+                answered it — and the server has always returned the count. */}
+            <div className="p-4 bg-slate-900/60 rounded-2xl">
+              <span className="text-2xl font-black text-slate-300">{testResult.totalUnanswered ?? 0}</span>
+              <p className="text-xs text-slate-400 mt-1 font-medium">Unanswered</p>
+            </div>
           </div>
 
-          <button
-            onClick={() => { setTestState('selecting'); setSelectedExam(null); setTestResult(null); }}
-            className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white font-medium rounded-xl text-sm shadow-sm"
-          >
-            Back to Post-UTME Papers
-          </button>
+          {typeof testResult.timeUsedSeconds === 'number' && testResult.timeUsedSeconds > 0 && (
+            <p className="text-xs text-slate-400 flex items-center justify-center gap-1.5">
+              <Clock className="w-3.5 h-3.5" /> Time on task:{' '}
+              {Math.floor(testResult.timeUsedSeconds / 60)}m {String(testResult.timeUsedSeconds % 60).padStart(2, '0')}s
+            </p>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            {/* Mirrors UTME's "Try Another Attempt" and Undergraduate's "Retake
+                Test" — Post-UTME previously offered only "back". */}
+            <button
+              onClick={() => { if (selectedExam) void handleOpenSetup(selectedExam); }}
+              className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white font-medium rounded-xl text-sm shadow-sm"
+            >
+              Retake this paper
+            </button>
+            <button
+              onClick={() => { setTestState('selecting'); setSelectedExam(null); setTestResult(null); }}
+              className="px-6 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-xl text-sm"
+            >
+              Back to Post-UTME Papers
+            </button>
+          </div>
         </div>
 
         {/* Review Questions */}
@@ -819,12 +897,28 @@ export default function PostUtmeDrillPage() {
             <div key={r.id} className="bg-[#0f172a] p-6 rounded-2xl border border-slate-800 space-y-3">
               <div className="flex items-center justify-between">
                 <span className="font-bold text-sm text-white">Question {idx + 1}</span>
-                <span className={`text-xs px-2.5 py-1 rounded-full font-semibold flex items-center gap-1 ${
-                  r.is_correct ? 'bg-amber-500/15 text-amber-300' : 'bg-rose-500/15 text-rose-300'
-                }`}>
-                  {r.is_correct ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                  {r.is_correct ? 'Correct' : 'Incorrect'}
-                </span>
+                {(() => {
+                  // Three outcomes, not two: a blank is "Not answered", which is
+                  // not the same as having chosen a wrong option.
+                  const unanswered = !r.student_answer;
+                  const cls = unanswered
+                    ? 'bg-slate-500/15 text-slate-300'
+                    : r.is_correct
+                    ? 'bg-amber-500/15 text-amber-300'
+                    : 'bg-rose-500/15 text-rose-300';
+                  return (
+                    <span className={`text-xs px-2.5 py-1 rounded-full font-semibold flex items-center gap-1 ${cls}`}>
+                      {unanswered ? (
+                        <MinusCircle className="w-3.5 h-3.5" />
+                      ) : r.is_correct ? (
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                      ) : (
+                        <XCircle className="w-3.5 h-3.5" />
+                      )}
+                      {unanswered ? 'Not answered' : r.is_correct ? 'Correct' : 'Incorrect'}
+                    </span>
+                  );
+                })()}
               </div>
 
               <p className="text-sm font-medium text-slate-200">{r.question_text}</p>

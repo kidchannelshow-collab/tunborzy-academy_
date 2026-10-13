@@ -20,12 +20,11 @@ import StudentLessonViewer from '../materials/StudentLessonViewer';
  * The content level reuses `StudentLessonViewer` unchanged — it already renders
  * the `{ blocks, attachments, publishSettings }` JSON that `LessonEditor` writes.
  *
- * Note on progress: the `visited` set below only drives the in-page progress
- * bars for THIS session. Durable completion now lives in `material_progress` and
- * is read and written by `StudentLessonViewer` itself, so a lesson marked
- * complete here persists and is still marked after a reload — the bars on this
- * page are a session convenience layered on top of that, not the source of
- * truth.
+ * Note on progress: completion is READ FROM and WRITTEN TO `material_progress`
+ * (UNIQUE user_id + material_id). The row is written by `StudentLessonViewer`
+ * when the student marks a lesson complete, and this page reads the same table,
+ * so the bars below survive a reload. They used to be driven by a session-local
+ * `visited` set, which meant a course a student had finished came back at 0%.
  */
 
 interface PostUtmeLearningPageProps {
@@ -47,12 +46,57 @@ export default function PostUtmeLearningPage({ onLogout, onNavigate }: PostUtmeL
   const [openTopic, setOpenTopic] = useState<string | null>(null);
   const [selectedMaterial, setSelectedMaterial] = useState<any | null>(null);
 
-  // Material ids opened this session, for the progress bars.
-  const [visited, setVisited] = useState<Set<string>>(new Set());
+  /**
+   * Material ids this student has actually COMPLETED, read from
+   * `material_progress`.
+   *
+   * The durable record is `material_progress` (UNIQUE user_id + material_id),
+   * which `StudentLessonViewer` upserts when a lesson is marked complete. This
+   * page reads that same table and is kept in step through `onProgressChange`,
+   * so the progress bars below survive a reload instead of resetting to 0%.
+   */
+  const [completedIds, setCompletedIds] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     fetchCourses();
   }, []);
+
+  /**
+   * Completion for the lessons just listed.
+   *
+   * Re-run whenever the profile resolves, because the first course fetch can
+   * land before `profile.id` exists — querying then would silently return
+   * nothing and leave every lesson looking unread.
+   */
+  useEffect(() => {
+    if (materials.length === 0) return;
+    void loadCompletion(materials.map((m: any) => m.id));
+  }, [profile?.id, materials]);
+
+  /** Read this student's completion for the given lessons. */
+  const loadCompletion = async (materialIds: string[]) => {
+    if (!supabase || !profile?.id || materialIds.length === 0) {
+      setCompletedIds({});
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from('material_progress')
+        .select('material_id, is_completed')
+        .eq('user_id', profile.id)
+        .in('material_id', materialIds);
+      if (error) throw error;
+
+      const next: Record<string, boolean> = {};
+      for (const row of (data || []) as any[]) {
+        if (row.is_completed) next[row.material_id] = true;
+      }
+      setCompletedIds(next);
+    } catch (err) {
+      // Non-fatal: every lesson still lists, just without its completion tick.
+      console.error('[post-utme materials] could not load completion state:', err);
+    }
+  };
 
   const fetchCourses = async () => {
     setLoading(true);
@@ -143,13 +187,12 @@ export default function PostUtmeLearningPage({ onLogout, onNavigate }: PostUtmeL
 
   const courseProgress = useMemo(() => {
     if (flatLessons.length === 0) return 0;
-    const done = flatLessons.filter((m) => visited.has(m.id)).length;
+    const done = flatLessons.filter((m) => completedIds[m.id]).length;
     return Math.round((done / flatLessons.length) * 100);
-  }, [flatLessons, visited]);
+  }, [flatLessons, completedIds]);
 
   const openLesson = (material: any) => {
     setSelectedMaterial(material);
-    setVisited((prev) => new Set(prev).add(material.id));
   };
 
   const back = () => {
@@ -181,6 +224,16 @@ export default function PostUtmeLearningPage({ onLogout, onNavigate }: PostUtmeL
             const sibling = materials.find((m) => m.id === siblingId);
             if (sibling) openLesson(sibling);
           }}
+          // Keeps the progress bars on the list behind this overlay in step
+          // without a refetch, the same contract AcademicMaterialsPage uses.
+          onProgressChange={(materialId, completed) =>
+            setCompletedIds((prev) => {
+              const next = { ...prev };
+              if (completed) next[materialId] = true;
+              else delete next[materialId];
+              return next;
+            })
+          }
         />
       </DashboardLayout>
     );
@@ -320,8 +373,8 @@ export default function PostUtmeLearningPage({ onLogout, onNavigate }: PostUtmeL
                     <div className="max-w-md">
                       <div className="flex items-center justify-between text-xs mb-2">
                         <span className="text-slate-400 font-medium">
-                          {flatLessons.filter((m) => visited.has(m.id)).length} of{' '}
-                          {flatLessons.length} lesson{flatLessons.length === 1 ? '' : 's'} opened
+                          {flatLessons.filter((m) => completedIds[m.id]).length} of{' '}
+                          {flatLessons.length} lesson{flatLessons.length === 1 ? '' : 's'} completed
                         </span>
                         <span className="text-amber-400 font-bold">{courseProgress}%</span>
                       </div>
@@ -332,7 +385,7 @@ export default function PostUtmeLearningPage({ onLogout, onNavigate }: PostUtmeL
                         />
                       </div>
                       <p className="text-[11px] text-slate-500 mt-2">
-                        Progress covers this session only.
+                        Saved to your account — progress is kept across sessions.
                       </p>
                     </div>
                   </div>
@@ -343,7 +396,7 @@ export default function PostUtmeLearningPage({ onLogout, onNavigate }: PostUtmeL
                   <div className="space-y-4">
                     {topicGroups.map((group, index) => {
                       const isOpen = openTopic === group.title;
-                      const done = group.materials.filter((m) => visited.has(m.id)).length;
+                      const done = group.materials.filter((m) => completedIds[m.id]).length;
                       return (
                         <div
                           key={group.title}
@@ -369,7 +422,7 @@ export default function PostUtmeLearningPage({ onLogout, onNavigate }: PostUtmeL
                               <span className="text-xs text-slate-500">
                                 {group.materials.length} lesson
                                 {group.materials.length === 1 ? '' : 's'}
-                                {done > 0 ? ` · ${done} opened` : ''}
+                                {done > 0 ? ` · ${done} completed` : ''}
                               </span>
                               <ChevronRight
                                 size={18}
@@ -384,7 +437,7 @@ export default function PostUtmeLearningPage({ onLogout, onNavigate }: PostUtmeL
                             <div className="divide-y divide-slate-800/50 border-t border-slate-800/50">
                               {group.materials.length > 0 ? (
                                 group.materials.map((material, mIndex) => {
-                                  const isDone = visited.has(material.id);
+                                  const isDone = !!completedIds[material.id];
                                   return (
                                     <button
                                       key={material.id}

@@ -616,11 +616,22 @@ export default function CourseManagement() {
 
       <AnimatePresence>
         {showLessonEditor && (
-          <LessonEditor 
+          <LessonEditor
             courseCode={path.course!.course_code}
             topic={path.topic!}
             portal={path.course!.portal || 'Undergraduate'}
-            semester={path.course!.semester || 'First Semester'}
+            /* `courses.semester` is only meaningful for Undergraduate; UTME and
+               Post-UTME courses carry null. Substituting 'First Semester' for
+               those — and for an Undergraduate course whose semester is
+               genuinely unset — filed the lesson under a semester the course is
+               not in, and the student library, which keeps only the open
+               semester, then filtered it straight back out. A course with no
+               semester now passes none through, which every reader treats as
+               "always visible". */
+            semester={
+              path.course!.semester
+              || (path.course!.portal === 'Undergraduate' ? 'First Semester' : '')
+            }
             lesson={editingLesson}
             onClose={() => setShowLessonEditor(false)}
             onSaved={() => {

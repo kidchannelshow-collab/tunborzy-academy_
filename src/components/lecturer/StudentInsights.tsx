@@ -1,20 +1,67 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { TrendingUp, Eye, Search, Filter, BarChart3 } from 'lucide-react';
+import {
+  TrendingUp, BarChart3, UploadCloud, Clock, Users, FileText, CheckCircle2,
+} from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useProfile } from '../../lib/useProfile';
 
+/**
+ * Lecturer analytics.
+ *
+ * WHAT THIS PAGE IS FOR
+ *
+ * It answers "what have I actually produced, and what are my students doing
+ * with it?" — not "who is enrolled". It previously opened on a Student
+ * Directory: a searchable, filterable table of every enrolled student, which is
+ * the same room as the CBT performance panel next to it and duplicated the
+ * admin's user management. That tab is gone; the activity that a lecturer can
+ * act on is what remains.
+ *
+ * Three tables move these numbers, and nothing else does:
+ *
+ *   course_enrollments — a student joining or leaving one of the lecturer's
+ *                        courses changes the reach count;
+ *   cbt_attempts       — a completed sitting changes every performance figure,
+ *                        the sittings count and the time-on-task total;
+ *   cbt_exams          — a new or retitled exam changes what the rows group by.
+ *
+ * The subscription below is unfiltered. Postgres Changes evaluates RLS per
+ * subscriber, so a lecturer is only ever delivered rows they are already
+ * allowed to read — the scoping in the queries is what keeps the derived
+ * numbers correct, and it is re-run on every event. The reload is coalesced so
+ * a burst of attempts produces one refresh rather than one per row.
+ * Cleaned up on unmount (and on profile change), so a lecturer who signs out
+ * leaves no channel behind.
+ */
 export default function StudentInsights() {
   const { profile } = useProfile();
-  
+
   const [loading, setLoading] = useState(true);
   const [courses, setCourses] = useState<any[]>([]);
   const [selectedCourse, setSelectedCourse] = useState('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'analytics' | 'students'>('analytics');
-  
-  const [students, setStudents] = useState<any[]>([]);
   const [performanceData, setPerformanceData] = useState<any[]>([]);
+
+  /**
+   * Real activity over the last seven days.
+   *
+   * Materials are scoped by COURSE CODE rather than `materials.lecturer_id`:
+   * the column is written but is not part of the materials DDL this repo
+   * carries, so filtering on it is one migration away from an empty list. The
+   * lecturer's own course codes are the join the rest of the dashboard already
+   * uses. Time on task is the wall-clock students spent sitting this lecturer's
+   * papers — the closest thing to a work metric the data actually supports.
+   * It is deliberately NOT a login count: nothing records lecturer presence,
+   * and an invented number is worse than an absent one.
+   */
+  const [activity, setActivity] = useState({
+    materialsTotal: 0,
+    materialsPublished: 0,
+    uploadsThisWeek: 0,
+    studentsReached: 0,
+    sittingsThisWeek: 0,
+    teachingMinutes: 0,
+  });
 
   useEffect(() => {
     if (profile) {
@@ -22,26 +69,6 @@ export default function StudentInsights() {
     }
   }, [profile?.id, profile?.role]);
 
-  /**
-   * Live analytics.
-   *
-   * Three tables actually move these numbers, and nothing else does:
-   *
-   *   course_enrollments — a student joining or leaving one of the lecturer's
-   *                        courses changes the directory and the "students
-   *                        attempted" counts;
-   *   cbt_attempts       — a completed sitting changes every performance figure;
-   *   cbt_exams          — a new or retitled exam changes what the rows group by.
-   *
-   * No filter is applied to the subscription. Postgres Changes evaluates RLS per
-   * subscriber, so a lecturer is only ever delivered rows they are already
-   * allowed to read — the scoping above is what keeps the derived numbers
-   * correct, and it is re-run on every event. The reload is coalesced so a burst
-   * of attempts produces one refresh rather than one per row.
-   *
-   * Cleaned up on unmount (and on profile change), so a lecturer who signs out
-   * leaves no channel behind.
-   */
   useEffect(() => {
     if (!supabase || !profile?.id) return;
 
@@ -68,7 +95,7 @@ export default function StudentInsights() {
     if (!supabase || !profile) return;
     setLoading(true);
     try {
-      // 1. Fetch courses managed by lecturer (or all if Admin)
+      // 1. The courses this lecturer manages (all of them for an Admin).
       let coursesQuery = supabase.from('courses').select('id, title, course_code, lecturer_id');
       if (profile.role !== 'Admin') {
         coursesQuery = coursesQuery.eq('lecturer_id', profile.id);
@@ -80,25 +107,37 @@ export default function StudentInsights() {
       const courseIds = managedCourses.map(c => c.id);
       const courseCodes = managedCourses.map(c => c.course_code).filter(Boolean);
 
-      // Fetch students enrolled in these courses
+      // 2. Materials authored against those course codes.
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 7);
+
+      let materialsTotal = 0;
+      let materialsPublished = 0;
+      let uploadsThisWeek = 0;
+      if (courseCodes.length > 0) {
+        const { data: mats } = await supabase
+          .from('materials')
+          .select('id, is_published, created_at')
+          .in('course_code', courseCodes);
+
+        for (const m of (mats || []) as any[]) {
+          materialsTotal++;
+          if (m.is_published) materialsPublished++;
+          if (m.created_at && new Date(m.created_at) >= weekAgo) uploadsThisWeek++;
+        }
+      }
+
+      // 3. Reach — distinct students enrolled across those courses.
+      let studentsReached = 0;
       if (courseIds.length > 0) {
         const { data: enrollmentData } = await supabase
           .from('course_enrollments')
-          .select('profiles(*)')
+          .select('student_id')
           .in('course_id', courseIds);
-        
-        if (enrollmentData) {
-          const uniqueProfiles = Array.from(
-            new Map(enrollmentData.map((e: any) => [e.profiles?.id, e.profiles])).values()
-          ).filter(Boolean);
-          setStudents(uniqueProfiles);
-        }
-      } else if (profile.role === 'Admin') {
-        const { data: allProfiles } = await supabase.from('profiles').select('*').eq('role', 'student');
-        setStudents(allProfiles || []);
+        studentsReached = new Set((enrollmentData || []).map((e: any) => e.student_id)).size;
       }
 
-      // 2. Fetch CBT attempts and questions, SCOPED IN THE QUERY.
+      // 4. CBT attempts and questions, SCOPED IN THE QUERY.
       //
       // These two previously ran unfiltered, and only the RENDER narrowed them.
       // That meant a lecturer's browser downloaded every completed attempt and
@@ -165,6 +204,31 @@ export default function StudentInsights() {
         if (exam.created_by === profile.id) return true;
         if (exam.course_code && courseCodes.includes(exam.course_code)) return true;
         return false;
+      });
+
+      // Time on task and sitting count over the last seven days, summed from the
+      // sittings that carry both timestamps. A row missing either is skipped
+      // rather than counted as zero-length, so an incomplete attempt never drags
+      // the total down.
+      let teachingMinutes = 0;
+      let sittingsThisWeek = 0;
+      for (const att of authorizedAttempts as any[]) {
+        if (!att.start_time || !att.end_time) continue;
+        const start = new Date(att.start_time).getTime();
+        const end = new Date(att.end_time).getTime();
+        if (Number.isNaN(start) || Number.isNaN(end) || end < start) continue;
+        if (start < weekAgo.getTime()) continue;
+        sittingsThisWeek++;
+        teachingMinutes += (end - start) / 60000;
+      }
+
+      setActivity({
+        materialsTotal,
+        materialsPublished,
+        uploadsThisWeek,
+        studentsReached,
+        sittingsThisWeek,
+        teachingMinutes: Math.round(teachingMinutes),
       });
 
       // Group performance by course code
@@ -261,190 +325,168 @@ export default function StudentInsights() {
     }
   };
 
-  const filteredStudents = students.filter(s => 
-    (s.full_name || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
-    (s.student_id || '').toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  /** Human duration, e.g. 135 -> "2h 15m". */
+  const formatDuration = (mins: number) => {
+    if (!mins) return '0m';
+    const h = Math.floor(mins / 60);
+    const m = Math.round(mins % 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
 
-  const displayedPerformance = selectedCourse === 'all' 
-    ? performanceData 
+  const displayedPerformance = selectedCourse === 'all'
+    ? performanceData
     : performanceData.filter(p => p.courseCode === selectedCourse || p.title === selectedCourse);
+
+  const ACTIVITY_TILES = [
+    {
+      label: 'Materials Published',
+      value: `${activity.materialsPublished} / ${activity.materialsTotal}`,
+      hint: 'Published out of everything authored',
+      icon: UploadCloud,
+      color: 'text-violet-400',
+      bg: 'bg-violet-500/10',
+    },
+    {
+      label: 'Uploaded This Week',
+      value: activity.uploadsThisWeek,
+      hint: 'Materials created in the last 7 days',
+      icon: FileText,
+      color: 'text-amber-400',
+      bg: 'bg-amber-500/10',
+    },
+    {
+      label: 'Students Reached',
+      value: activity.studentsReached,
+      hint: 'Enrolled across your courses',
+      icon: Users,
+      color: 'text-blue-400',
+      bg: 'bg-blue-500/10',
+    },
+    {
+      label: 'Sittings This Week',
+      value: activity.sittingsThisWeek,
+      hint: 'Completed CBT attempts on your papers',
+      icon: CheckCircle2,
+      color: 'text-emerald-400',
+      bg: 'bg-emerald-500/10',
+    },
+    {
+      label: 'Time on Task (7d)',
+      value: formatDuration(activity.teachingMinutes),
+      hint: 'Time students spent on your CBT papers',
+      icon: Clock,
+      color: 'text-rose-400',
+      bg: 'bg-rose-500/10',
+    },
+  ];
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="max-w-7xl mx-auto pb-12 space-y-8">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-display font-bold text-white mb-2">Student Management & Analytics</h1>
-          <p className="text-slate-400">Monitor engagement, analyze performance, and manage your students.</p>
+          <h1 className="text-3xl font-display font-bold text-white mb-2">Teaching Analytics</h1>
+          <p className="text-slate-400">What you have published, and how your students are doing with it.</p>
         </div>
-        
-        <div className="flex items-center gap-3">
-          <select 
-             value={selectedCourse} 
-             onChange={e => setSelectedCourse(e.target.value)}
-            className="bg-[#0f172a] border border-slate-700 text-white rounded-xl px-4 py-2 focus:outline-none focus:border-amber-500"
-          >
-            <option value="all">All Managed Courses</option>
-            {courses.map(c => <option key={c.id} value={c.course_code || c.title}>{c.course_code ? `${c.course_code} - ` : ''}{c.title}</option>)}
-          </select>
-          <button className="p-2 bg-slate-800 text-slate-300 hover:text-white rounded-xl transition-colors border border-slate-700" title="Export Report">
-            <Eye size={20} />
-          </button>
-        </div>
+
+        <select
+          value={selectedCourse}
+          onChange={e => setSelectedCourse(e.target.value)}
+          className="bg-[#0f172a] border border-slate-700 text-white rounded-xl px-4 py-2 focus:outline-none focus:border-amber-500"
+        >
+          <option value="all">All Managed Courses</option>
+          {courses.map(c => <option key={c.id} value={c.course_code || c.title}>{c.course_code ? `${c.course_code} - ` : ''}{c.title}</option>)}
+        </select>
       </div>
 
-      {/* Tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-800 pb-px">
-        <button 
-          onClick={() => setActiveTab('analytics')}
-          className={`px-6 py-3 font-bold text-sm transition-colors relative ${activeTab === 'analytics' ? 'text-amber-500' : 'text-slate-400 hover:text-white'}`}
-        >
-          Performance Analytics
-          {activeTab === 'analytics' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-amber-500"></div>}
-        </button>
-        <button 
-          onClick={() => setActiveTab('students')}
-          className={`px-6 py-3 font-bold text-sm transition-colors relative ${activeTab === 'students' ? 'text-amber-500' : 'text-slate-400 hover:text-white'}`}
-        >
-          Student Directory
-          {activeTab === 'students' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-amber-500"></div>}
-        </button>
-      </div>
-
-      {activeTab === 'analytics' ? (
-        <div className="space-y-6">
-          {loading ? (
-            <div className="flex items-center justify-center py-20">
-              <div className="animate-spin h-10 w-10 border-4 border-amber-500 border-t-transparent rounded-full"></div>
+      {/* Activity metrics — real numbers, computed on each load and refreshed
+          live by the subscription above. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+        {ACTIVITY_TILES.map((tile) => (
+          <div key={tile.label} className="bg-[#0f172a] border border-slate-800 rounded-3xl p-5">
+            <div className={`w-11 h-11 rounded-2xl ${tile.bg} flex items-center justify-center mb-4`}>
+              <tile.icon size={22} className={tile.color} />
             </div>
-          ) : displayedPerformance.length > 0 ? (
-            <div className="grid grid-cols-1 gap-6">
-              {displayedPerformance.map(perf => (
-                <div key={perf.courseCode} className="bg-[#0f172a] border border-slate-800 rounded-3xl p-6 shadow-xl space-y-6">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
-                    <div>
-                      <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">{perf.courseCode}</span>
-                      <h3 className="text-2xl font-bold text-white mt-1">{perf.title}</h3>
-                    </div>
-                    <div className="flex items-center gap-6">
-                      <div className="bg-slate-900 border border-slate-800 px-4 py-2.5 rounded-2xl text-center">
-                        <div className="text-xs text-slate-400 font-semibold uppercase">Students Attempted</div>
-                        <div className="text-xl font-bold text-white">{perf.studentsAttempted}</div>
-                      </div>
-                      <div className="bg-slate-900 border border-slate-800 px-4 py-2.5 rounded-2xl text-center">
-                        <div className="text-xs text-slate-400 font-semibold uppercase">Average Score</div>
-                        <div className="text-xl font-bold text-emerald-400">{perf.averageScore}%</div>
-                      </div>
-                      <div className="bg-slate-900 border border-slate-800 px-4 py-2.5 rounded-2xl text-center">
-                        <div className="text-xs text-slate-400 font-semibold uppercase">Questions Attempted</div>
-                        <div className="text-xl font-bold text-indigo-400">{perf.questionsAttempted}</div>
-                      </div>
-                    </div>
-                  </div>
+            <div className="text-2xl font-display font-bold text-white">{tile.value}</div>
+            <div className="text-sm text-slate-300 font-medium mt-1">{tile.label}</div>
+            <div className="text-xs text-slate-500 mt-1">{tile.hint}</div>
+          </div>
+        ))}
+      </div>
 
+      {/* Per-course performance */}
+      <div className="space-y-6">
+        <h2 className="text-xl font-display font-bold text-white flex items-center gap-2">
+          <BarChart3 size={20} className="text-amber-400" /> Performance by course
+        </h2>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-20">
+            <div className="animate-spin h-10 w-10 border-4 border-amber-500 border-t-transparent rounded-full"></div>
+          </div>
+        ) : displayedPerformance.length > 0 ? (
+          <div className="grid grid-cols-1 gap-6">
+            {displayedPerformance.map(perf => (
+              <div key={perf.courseCode} className="bg-[#0f172a] border border-slate-800 rounded-3xl p-6 shadow-xl space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                   <div>
-                    <h4 className="text-sm font-bold text-slate-300 uppercase tracking-wider mb-4 flex items-center gap-2">
-                      <BarChart3 size={16} className="text-amber-400" /> Topic Performance Breakdown
-                    </h4>
-                    {perf.topics.length > 0 ? (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {perf.topics.map((t: any) => (
-                          <div key={t.topic} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center justify-between">
-                            <div>
-                              <div className="font-semibold text-slate-200 text-sm">{t.topic}</div>
-                              <div className="text-xs text-slate-500 mt-0.5">{t.attempts} test attempt{t.attempts !== 1 ? 's' : ''}</div>
-                            </div>
-                            <div className="text-right">
-                              <span className={`text-base font-bold ${t.avgScore >= 70 ? 'text-emerald-400' : t.avgScore >= 50 ? 'text-amber-400' : 'text-rose-400'}`}>
-                                {t.avgScore}%
-                              </span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-slate-500">No topic performance data recorded for this course yet.</p>
-                    )}
+                    <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">{perf.courseCode}</span>
+                    <h3 className="text-2xl font-bold text-white mt-1">{perf.title}</h3>
+                  </div>
+                  <div className="flex items-center gap-6">
+                    <div className="bg-slate-900 border border-slate-800 px-4 py-2.5 rounded-2xl text-center">
+                      <div className="text-xs text-slate-400 font-semibold uppercase">Students Attempted</div>
+                      <div className="text-xl font-bold text-white">{perf.studentsAttempted}</div>
+                    </div>
+                    <div className="bg-slate-900 border border-slate-800 px-4 py-2.5 rounded-2xl text-center">
+                      <div className="text-xs text-slate-400 font-semibold uppercase">Average Score</div>
+                      <div className="text-xl font-bold text-emerald-400">{perf.averageScore}%</div>
+                    </div>
+                    <div className="bg-slate-900 border border-slate-800 px-4 py-2.5 rounded-2xl text-center">
+                      <div className="text-xs text-slate-400 font-semibold uppercase">Questions Attempted</div>
+                      <div className="text-xl font-bold text-indigo-400">{perf.questionsAttempted}</div>
+                    </div>
                   </div>
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className="bg-[#0f172a] border border-slate-800 rounded-2xl p-12 text-center shadow-xl">
-               <div className="w-16 h-16 rounded-full bg-slate-800/50 flex items-center justify-center mx-auto mb-4">
-                 <TrendingUp className="text-slate-500" size={32} />
-               </div>
-               <h3 className="text-xl font-bold text-white mb-2">No Performance Data Yet</h3>
-               <p className="text-slate-400 max-w-md mx-auto">
-                 Once students start attempting CBT exams for your managed courses, aggregate performance metrics will appear here.
-               </p>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="relative flex-1 max-w-md">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
-              <input 
-                type="text" 
-                placeholder="Search by name or ID..." 
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 bg-[#0f172a] border border-slate-700 rounded-xl text-white focus:outline-none focus:border-amber-500 transition-colors"
-              />
-            </div>
-            <button className="flex items-center gap-2 px-4 py-2.5 bg-[#0f172a] border border-slate-700 text-slate-300 rounded-xl hover:text-white hover:border-slate-600 transition-colors">
-              <Filter size={18} />
-              <span className="font-semibold text-sm">Filters</span>
-            </button>
-          </div>
 
-          <div className="bg-[#0f172a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-900/50 border-b border-slate-800 text-slate-400 text-xs uppercase tracking-wider">
-                    <th className="px-6 py-4 font-bold">Student</th>
-                    <th className="px-6 py-4 font-bold">Student ID</th>
-                    <th className="px-6 py-4 font-bold">Email</th>
-                    <th className="px-6 py-4 font-bold">Level</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/50">
-                  {loading ? (
-                    <tr>
-                      <td colSpan={4} className="px-6 py-12 text-center text-slate-400">Loading students...</td>
-                    </tr>
-                  ) : filteredStudents.length === 0 ? (
-                    <tr>
-                      <td colSpan={4} className="px-6 py-12 text-center text-slate-400">
-                        {searchQuery ? 'No students match your search.' : 'No students found.'}
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredStudents.map((student) => (
-                      <tr key={student.id} className="hover:bg-slate-800/20 transition-colors">
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 rounded-full bg-amber-500/10 text-amber-500 flex items-center justify-center font-bold text-sm shrink-0">
-                              {(student.full_name || 'U').charAt(0).toUpperCase()}
-                            </div>
-                            <span className="font-medium text-slate-200">{student.full_name || 'Unknown Student'}</span>
+                <div>
+                  <h4 className="text-sm font-bold text-slate-300 uppercase tracking-wider mb-4 flex items-center gap-2">
+                    <BarChart3 size={16} className="text-amber-400" /> Topic Performance Breakdown
+                  </h4>
+                  {perf.topics.length > 0 ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {perf.topics.map((t: any) => (
+                        <div key={t.topic} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center justify-between">
+                          <div>
+                            <div className="font-semibold text-slate-200 text-sm">{t.topic}</div>
+                            <div className="text-xs text-slate-500 mt-0.5">{t.attempts} test attempt{t.attempts !== 1 ? 's' : ''}</div>
                           </div>
-                        </td>
-                        <td className="px-6 py-4 text-slate-300 font-mono text-sm">{student.student_id || '—'}</td>
-                        <td className="px-6 py-4 text-slate-400 text-sm">{student.email}</td>
-                        <td className="px-6 py-4 text-slate-400 text-sm">{student.level || '—'}</td>
-                      </tr>
-                    ))
+                          <div className="text-right">
+                            <span className={`text-base font-bold ${t.avgScore >= 70 ? 'text-emerald-400' : t.avgScore >= 50 ? 'text-amber-400' : 'text-rose-400'}`}>
+                              {t.avgScore}%
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500">No topic performance data recorded for this course yet.</p>
                   )}
-                </tbody>
-              </table>
-            </div>
+                </div>
+              </div>
+            ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="bg-[#0f172a] border border-slate-800 rounded-2xl p-12 text-center shadow-xl">
+            <div className="w-16 h-16 rounded-full bg-slate-800/50 flex items-center justify-center mx-auto mb-4">
+              <TrendingUp className="text-slate-500" size={32} />
+            </div>
+            <h3 className="text-xl font-bold text-white mb-2">No Performance Data Yet</h3>
+            <p className="text-slate-400 max-w-md mx-auto">
+              Once students start attempting CBT exams for your managed courses, aggregate performance metrics will appear here.
+            </p>
+          </div>
+        )}
+      </div>
     </motion.div>
   );
 }

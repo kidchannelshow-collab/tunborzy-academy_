@@ -1688,16 +1688,43 @@ Instructions:
         .select('*').eq('id', attemptId).single();
       if (attemptErr) throw attemptErr;
 
-      const { data: questions, error: qErr } = await sb.from('post_utme_questions')
-        .select('*').eq('exam_id', attempt.exam_id);
+      // ---- GRADE THE SITTING, NOT THE PAPER -------------------------------
+      // This endpoint used to grade every question in the paper, ignoring which
+      // ones the sitting actually served. Because the setup screen lets a
+      // student draw 10 of a 500-question bank, a 10-question drill was scored
+      // out of 500: the ten answers were marked, the 490 questions the student
+      // never saw were counted unanswered, and the reported score came out at
+      // roughly 2% of what it should be. `/api/utme/submit` and
+      // `/api/cbt/submit` both grade `attempt.answers.question_ids`; this now
+      // does the same, so all three pipelines agree.
+      //
+      // The fallback covers only attempts started before `question_ids` was
+      // recorded — with no served list there is nothing else to grade against.
+      const servedIds: string[] = Array.isArray(attempt.answers?.question_ids)
+        ? attempt.answers.question_ids
+        : [];
+
+      let questionQuery = sb.from('post_utme_questions').select('*');
+      questionQuery = servedIds.length > 0
+        ? questionQuery.in('id', servedIds)
+        : questionQuery.eq('exam_id', attempt.exam_id);
+
+      const { data: rawQuestions, error: qErr } = await questionQuery;
       if (qErr) throw qErr;
+
+      // `.in()` does not preserve the argument order, so the served order is
+      // restored here — the same order the student answered them in.
+      const byId = new Map<string, any>((rawQuestions || []).map((q: any) => [q.id, q]));
+      const questions = servedIds.length > 0
+        ? servedIds.map((id) => byId.get(id)).filter(Boolean)
+        : (rawQuestions || []);
 
       let totalCorrect = 0;
       let totalWrong = 0;
       let totalUnanswered = 0;
       const results = [];
 
-      for (const q of (questions || [])) {
+      for (const q of questions) {
         const studentAns = studentAnswers[q.id] || null;
         const isCorrect = studentAns === q.correct_option;
         if (!studentAns) totalUnanswered++;
@@ -1711,6 +1738,9 @@ Instructions:
           option_b: q.option_b,
           option_c: q.option_c,
           option_d: q.option_d,
+          // Fifth option. Optional on papers that print four, so a four-option
+          // paper leaves it null and the review skips the empty tile.
+          option_e: q.option_e,
           student_answer: studentAns,
           correct_option: q.correct_option,
           explanation: q.explanation,
@@ -1718,7 +1748,7 @@ Instructions:
         });
       }
 
-      const totalQuestions = (questions || []).length;
+      const totalQuestions = questions.length;
       const score = totalQuestions > 0 ? Math.round((totalCorrect / totalQuestions) * 100) : 0;
 
       const { error: updErr } = await sb.from('post_utme_attempts').update({
@@ -1726,13 +1756,30 @@ Instructions:
         score,
         total_correct: totalCorrect,
         total_wrong: totalWrong,
-        answers: { question_ids: (questions || []).map(q => q.id), student_answers: studentAnswers },
+        // `post_utme_attempts` has no `total_unanswered` column — UTME's attempt
+        // table does, this one does not — so the unanswered count is returned to
+        // the caller but never written. Writing it raised 42703 and failed the
+        // whole update, which left the attempt stuck in `in_progress` with no
+        // score, i.e. a sitting that vanished from every history view.
+        answers: { question_ids: questions.map(q => q.id), student_answers: studentAnswers },
         end_time: new Date().toISOString()
       }).eq('id', attemptId);
 
       if (updErr) throw updErr;
 
-      res.json({ score, totalCorrect, totalWrong, totalUnanswered, totalQuestions, results });
+      // Time on task, derived from the attempt the start endpoint opened. UTME
+      // sends `timeUsed` from the client and Undergraduate derives it from
+      // `start_time`/`end_time`; Post-UTME returned nothing at all, so a finished
+      // drill could not show how long it took even though both timestamps are
+      // already recorded on the row.
+      const startedAt = attempt.start_time ? new Date(attempt.start_time).getTime() : NaN;
+      const endedAt = Date.now();
+      const timeUsedSeconds =
+        Number.isFinite(startedAt) && endedAt > startedAt
+          ? Math.round((endedAt - startedAt) / 1000)
+          : null;
+
+      res.json({ score, totalCorrect, totalWrong, totalUnanswered, totalQuestions, timeUsedSeconds, results });
     } catch (err: any) {
       console.error('[Post-UTME Submit Error]', err);
       res.status(500).json({ error: err.message });

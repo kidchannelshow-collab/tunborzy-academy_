@@ -14,3 +14,37 @@
 export const POST_UTME_UNIVERSITY_CODE = 'UNILORIN';
 
 export const POST_UTME_UNIVERSITY_NAME = 'University of Ilorin';
+
+/**
+ * Every spelling this programme's papers may carry.
+ *
+ * `post_utme_exams.university` is free text written by the admin importer, so a
+ * match has to accept the name and the code in either case rather than one
+ * exact string.
+ */
+const UNILORIN_ALIASES = new Set([
+  POST_UTME_UNIVERSITY_CODE.toLowerCase(),
+  POST_UTME_UNIVERSITY_NAME.toLowerCase(),
+  'unilorin',
+  'university of ilorin',
+]);
+
+/**
+ * True when a stored `post_utme_exams.university` names this programme's
+ * university.
+ *
+ * A paper with no university recorded is KEPT: those predate the
+ * single-university rule, and hiding them would withdraw papers that currently
+ * work.
+ *
+ * This lives here, not in the drill, because TWO surfaces have to agree on it.
+ * The student drill hides a paper that fails this test, so a staff manager that
+ * badges it "Live" without checking would advertise a paper no student can
+ * reach. Both now read the same rule.
+ */
+export function isUnilorinPaper(university: unknown): boolean {
+  const value = String(university ?? '').trim().toLowerCase();
+  if (!value) return true;
+  return UNILORIN_ALIASES.has(value);
+}
+
