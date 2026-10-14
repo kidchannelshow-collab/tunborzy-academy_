@@ -30,6 +30,25 @@ import { supabase } from '../supabaseClient';
  * place the 32-bit ceiling is enforced, so a table that has genuinely reached
  * INT_MAX cannot overflow either: a caller that hits the ceiling gets a clamped,
  * still-valid integer rather than a failed write.
+ *
+ * CHAINING — WHY NOTHING HERE IS TYPED `any`
+ *
+ * `.eq()`, `.is()`, `.order()` and `.limit()` are methods on Postgrest's FILTER
+ * builder, not on the query builder `supabase.from(table)` returns. Chaining one
+ * straight onto `from()` therefore compiles only if TypeScript is not checking,
+ * and fails at runtime with
+ *
+ *     supabase.from(...).eq is not a function
+ *
+ * — surfacing to the author as "Could not save: …". `select()`, `insert()`,
+ * `update()` and `delete()` are the four methods that return the filter builder,
+ * so a filter must always follow one of them.
+ *
+ * Every builder below is left for TypeScript to INFER rather than annotated
+ * `any`. That is the whole point: with the type intact, a mis-chained filter is
+ * a compile error at the line that wrote it, instead of a thrown exception on a
+ * user's save. Do not reintroduce an `any` here to silence a type error — the
+ * annotation is what makes this class of bug unshippable.
  */
 
 /** PostgreSQL `integer` upper bound. */
@@ -57,20 +76,12 @@ export function safeOrderIndex(value: unknown, fallback = 0): number {
 }
 
 /**
- * The next free order index within one already-filtered scope.
+ * Turn one page of `{ order_index }` rows — the highest in the scope — into the
+ * next free index.
  *
- * `query` is a Supabase builder with its `.select('order_index')` and its scope
- * filters already applied (one topic's materials, one course's modules, …). It
- * is typed loosely because the builder's generic type is not nameable across
- * the different tables this serves.
- *
- * Returns 0 when the scope is empty, so the first child sorts first.
+ * Returns 0 for an empty scope, so the first child sorts first.
  */
-async function readNextOrderIndex(query: any): Promise<number> {
-  const { data, error } = await query
-    .order('order_index', { ascending: false, nullsFirst: false })
-    .limit(1);
-
+function nextIndexAfterPage(data: unknown, error: { message?: string } | null): number {
   // A failed lookup must not sink the write. Falling back to 0 puts the new row
   // among its siblings rather than aborting the save; the author can reorder it.
   if (error) {
@@ -78,29 +89,51 @@ async function readNextOrderIndex(query: any): Promise<number> {
     return 0;
   }
 
-  const highest = Array.isArray(data) && data.length > 0 ? safeOrderIndex(data[0]?.order_index, -1) : -1;
+  const rows = Array.isArray(data) ? data : [];
+  const highest = rows.length > 0 ? safeOrderIndex((rows[0] as any)?.order_index, -1) : -1;
   if (highest < 0) return 0;
   return Math.min(highest + 1, PG_INT_MAX);
 }
 
-/** Next order index for a material within one course + topic. */
+/**
+ * Next order index for a material within one course + topic.
+ *
+ * Used on INSERT only — the lesson editor and the material upload modal both
+ * call this instead of stamping the row with a timestamp.
+ */
 export async function nextMaterialOrderIndex(
   courseCode: string,
   topic: string | null | undefined,
 ): Promise<number> {
   if (!supabase) return 0;
-  let query: any = supabase.from('materials').select('order_index').eq('course_code', courseCode);
+
+  // `select()` first — this is the filter builder, so `.eq()`/`.is()` exist.
+  const base = supabase.from('materials').select('order_index').eq('course_code', courseCode);
+
   // `topic` is nullable. Filtering `.eq('topic', null)` matches nothing in
   // PostgREST, which would hand every untopic'd material index 0 forever, so
   // the null case is expressed as `.is()`.
-  query = topic ? query.eq('topic', topic) : query.is('topic', null);
-  return readNextOrderIndex(query);
+  const scoped = topic ? base.eq('topic', topic) : base.is('topic', null);
+
+  const { data, error } = await scoped
+    .order('order_index', { ascending: false, nullsFirst: false })
+    .limit(1);
+
+  return nextIndexAfterPage(data, error);
 }
 
 /** Next order index for a topic (`course_modules` row) within one course. */
 export async function nextCourseModuleOrderIndex(courseId: string): Promise<number> {
   if (!supabase) return 0;
-  return readNextOrderIndex(supabase.from('course_modules').select('order_index').eq('course_id', courseId));
+
+  const { data, error } = await supabase
+    .from('course_modules')
+    .select('order_index')
+    .eq('course_id', courseId)
+    .order('order_index', { ascending: false, nullsFirst: false })
+    .limit(1);
+
+  return nextIndexAfterPage(data, error);
 }
 
 /**
@@ -111,7 +144,13 @@ export async function nextCourseModuleOrderIndex(courseId: string): Promise<numb
  */
 export async function nextCourseOrderIndex(portal: string, semester?: string | null): Promise<number> {
   if (!supabase) return 0;
-  let query: any = supabase.from('courses').select('order_index').eq('portal', portal);
-  query = semester ? query.eq('semester', semester) : query.is('semester', null);
-  return readNextOrderIndex(query);
+
+  const base = supabase.from('courses').select('order_index').eq('portal', portal);
+  const scoped = semester ? base.eq('semester', semester) : base.is('semester', null);
+
+  const { data, error } = await scoped
+    .order('order_index', { ascending: false, nullsFirst: false })
+    .limit(1);
+
+  return nextIndexAfterPage(data, error);
 }

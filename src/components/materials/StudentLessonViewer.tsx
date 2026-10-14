@@ -321,10 +321,35 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
     onNavigateToSibling?.(siblingId);
   };
 
+  /**
+   * The card every content block sits in.
+   *
+   * ONE shape for every block type — the same dark panel, rounded-3xl and slate
+   * border the lesson editor draws around each block as it is being written — so
+   * the reading view is the layout the author composed rather than a run of
+   * bare paragraphs. `renderBlock` below therefore returns only the block's
+   * INNER content; the card comes from the wrapper in the render, which is what
+   * keeps the shape in one place instead of repeated per branch and drifting
+   * apart (some branches used to be `rounded-2xl p-4`, others `rounded-3xl
+   * p-8`, with three different bottom margins).
+   *
+   * Semantic colour is deliberately NOT part of the card: a worked example still
+   * announces itself with an amber heading and a formula is still tinted violet
+   * — those accents moved inside, where they read as content rather than as a
+   * different kind of container.
+   */
+  const BLOCK_CARD = 'bg-[#0f172a]/50 border border-slate-800/50 rounded-3xl p-6 md:p-8 mb-8 shadow-lg';
+
+  /**
+   * `renderBlock` returns the INNER content of a block only.
+   *
+   * The `title` block is the exception the wrapper handles: it is the lesson's
+   * own heading, so it renders bare above the cards rather than inside one.
+   */
   const renderBlock = (block: any) => {
     switch (block.type) {
       case 'title':
-        return <h1 className="text-4xl md:text-5xl font-display font-bold text-white mb-8 leading-tight">{block.content}</h1>;
+        return <h1 className="text-4xl md:text-5xl font-display font-bold text-white leading-tight">{block.content}</h1>;
       case 'intro':
         return (
           // `lesson-content` carries the real typography (see index.css): it
@@ -332,8 +357,8 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
           // Tailwind's preflight strips. The `prose` classes this file used
           // before were inert — the Tailwind typography plugin is not installed
           // — so saved formatting previously had no styling at all.
-          <div className="text-xl md:text-2xl text-slate-200 font-body mb-10 border-l-4 border-sky-500 pl-6 py-3 bg-sky-500/5 rounded-r-2xl">
-            <div className="lesson-content">
+          <div className="border-l-4 border-sky-500 pl-5">
+            <div className="lesson-content text-xl md:text-2xl text-slate-200 font-body">
               <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{block.content}</ReactMarkdown>
             </div>
           </div>
@@ -341,20 +366,15 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
       case 'main':
       case 'summary':
         return (
-          // Same card container the editor shows around each block (dark panel,
-          // rounded border), so the reading view is the preview the author saw
-          // rather than an undifferentiated run of plain text.
-          <div className="bg-[#0f172a]/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-8 shadow-lg">
-            {/* `.lesson-content` sets typography but no colour or size, so these
-                utilities stay in charge of the reading size and text colour. */}
-            <div className="lesson-content text-lg text-slate-300 font-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{block.content}</ReactMarkdown>
-            </div>
+          // `.lesson-content` sets typography but no colour or size, so these
+          // utilities stay in charge of the reading size and text colour.
+          <div className="lesson-content text-lg text-slate-300 font-body">
+            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{block.content}</ReactMarkdown>
           </div>
         );
       case 'example':
         return (
-          <div className="bg-[#0d1a33] border border-violet-500/25 rounded-3xl p-6 md:p-8 mb-10 shadow-lg">
+          <div>
             <h4 className="text-amber-400 font-bold uppercase tracking-widest text-sm mb-5 flex items-center gap-2">
               <BookOpen size={16} /> Worked Example
             </h4>
@@ -365,7 +385,7 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
         );
       case 'formula':
         return (
-          <div className="bg-violet-950/25 border border-violet-500/25 rounded-3xl p-6 mb-10 overflow-x-auto text-center flex items-center justify-center min-h-[100px]">
+          <div className="overflow-x-auto text-center flex items-center justify-center min-h-[80px]">
             <div className="text-xl md:text-2xl text-violet-100">
               <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{block.content}</ReactMarkdown>
             </div>
@@ -374,8 +394,8 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
       case 'image':
       case 'diagram':
         return block.fileUrl ? (
-          <div className="mb-8">
-            <div 
+          <figure>
+            <div
               className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-800 cursor-zoom-in group"
               onClick={() => setLightboxImage(block.fileUrl)}
             >
@@ -386,16 +406,16 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
                 </div>
               </div>
             </div>
-            {block.content && <p className="text-center text-sm text-slate-500 mt-3">{block.content}</p>}
-          </div>
+            {block.content && <figcaption className="text-center text-sm text-slate-500 mt-3">{block.content}</figcaption>}
+          </figure>
         ) : null;
       case 'audio':
         return block.fileUrl ? (
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center gap-4 mb-8 shadow-lg">
+          <div className="flex items-center gap-4">
             <div className="w-12 h-12 bg-indigo-500/20 rounded-full flex items-center justify-center shrink-0">
               <Music className="text-indigo-400" size={20} />
             </div>
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               {block.content && <p className="text-sm font-medium text-slate-300 mb-2">{block.content}</p>}
               <audio controls className="w-full outline-none h-10 custom-audio" src={block.fileUrl} />
             </div>
@@ -403,13 +423,13 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
         ) : null;
       case 'video':
         return (
-          <div className="mb-8">
+          <div>
             {block.content && (block.content.includes('youtube.com') || block.content.includes('youtu.be')) ? (
               <div className="aspect-video w-full rounded-2xl overflow-hidden border border-slate-800 shadow-xl bg-slate-900">
-                <iframe 
-                  width="100%" height="100%" 
-                  src={`https://www.youtube.com/embed/${block.content.split('v=')[1]?.split('&')[0] || block.content.split('youtu.be/')[1]}`} 
-                  title="YouTube video player" frameBorder="0" 
+                <iframe
+                  width="100%" height="100%"
+                  src={`https://www.youtube.com/embed/${block.content.split('v=')[1]?.split('&')[0] || block.content.split('youtu.be/')[1]}`}
+                  title="YouTube video player" frameBorder="0"
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen
                 ></iframe>
               </div>
@@ -425,7 +445,7 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
         );
       case 'references':
         return (
-          <div className="bg-[#0f172a]/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-8">
+          <div>
             <h4 className="text-slate-400 font-bold uppercase tracking-widest text-sm mb-4">References</h4>
             <div className="lesson-content text-sm text-slate-500">
               <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{block.content}</ReactMarkdown>
@@ -644,11 +664,27 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
           )}
 
           <div>
-            {visibleBlocks.map((block, i) => (
-              <React.Fragment key={block.id || i}>
-                {renderBlock(block)}
-              </React.Fragment>
-            ))}
+            {visibleBlocks.map((block, i) => {
+              const inner = renderBlock(block);
+              // A block the reader cannot render — an image or audio block whose
+              // file was never uploaded, say — renders nothing at all. Without
+              // this the wrapper would still draw its card and leave an empty
+              // dark panel in the middle of the lesson.
+              if (!inner) return null;
+              return (
+                <React.Fragment key={block.id || i}>
+                  {/* Every block is boxed in the same card. The title block is
+                      the lesson's own heading, so it renders bare — boxing it
+                      would put the document title inside a panel and read as a
+                      section like any other. */}
+                  {block.type === 'title' ? (
+                    <div className="mb-8">{inner}</div>
+                  ) : (
+                    <section className={BLOCK_CARD}>{inner}</section>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </div>
 
           {doc.slides.length > 1 && (

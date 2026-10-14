@@ -167,13 +167,17 @@ export default function MaterialViewer({ material, onClose }: MaterialViewerProp
 
     if (type === 'pdf') {
       if (!hasRealFile) return fileHandoffCard('PDF');
-      return (
+      // Boxed like every other preview. This branch used to render a bare white
+      // page floating in the panel — the one preview that was not inside a card,
+      // which is what made the PDF view read as a different, unfinished surface.
+      return previewCard(
         <div
-          className="rounded-3xl overflow-hidden border border-slate-800 bg-white mx-auto transition-all duration-300 h-[70vh] w-full max-w-4xl"
+          className="rounded-2xl overflow-hidden border border-slate-800 bg-white mx-auto transition-all duration-300 h-[70vh] w-full"
           style={{ transform: `scale(${zoomLevel / 100})`, transformOrigin: 'top center' }}
         >
           <iframe src={material.file_url} title={material.title} className="w-full h-full" />
-        </div>
+        </div>,
+        'PDF document',
       );
     }
 

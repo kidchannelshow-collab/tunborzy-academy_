@@ -13,7 +13,6 @@ import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import 'katex/dist/katex.min.css';
 import { useProfile } from '../../lib/useProfile';
-import LessonMaterialsManager from './LessonMaterialsManager';
 import LessonPublishingSettings from './LessonPublishingSettings';
 import { nextMaterialOrderIndex } from '../../lib/materialOrder';
 import {
@@ -242,7 +241,7 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
 
   const [doc, setDoc] = useState<LessonDoc>(() => createEmptyDocument());
   const [activeSlide, setActiveSlide] = useState(0);
-  const [activeTab, setActiveTab] = useState<'content' | 'materials' | 'settings'>('content');
+  const [activeTab, setActiveTab] = useState<'content' | 'settings'>('content');
   const [isLoadingRecord, setIsLoadingRecord] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [status, setStatus] = useState<'draft' | 'published'>('draft');
@@ -957,15 +956,21 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
           </div>
         </div>
 
-        {/* Section tabs. `activeTab` existed as state with the Materials and
-            Publishing Settings panels already written against it, but there was
-            no control to ever change it — so both panels were unreachable and a
-            lesson could never be given attachments or a publish status. */}
+        {/* Two tabs only.
+            The third — "Materials", an in-editor file/audio/video uploader — was
+            removed at the product owner's request. A lesson's attachments now
+            come from the course hierarchy's own uploader (MaterialUploadModal),
+            which is the one place a file is uploaded and registered.
+
+            The `attachments` array is NOT dropped from the document: existing
+            lessons still carry theirs, `parseLessonDocument` still reads it,
+            `serializeLessonDocument` still writes it, and the student viewer
+            still renders it. Removing the tab removes the uploader, not the
+            data. */}
         {!isPreviewMode && (
           <div className="hidden md:flex items-center gap-1 bg-[#020617] border border-slate-800 rounded-xl p-1">
             {([
               ['content', 'Content'],
-              ['materials', 'Materials'],
               ['settings', 'Settings'],
             ] as const).map(([id, label]) => (
               <button
@@ -1055,21 +1060,38 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
 
       {/* Editor Canvas */}
       <div className="flex-1 overflow-y-auto p-6 md:p-10 scroll-smooth custom-scrollbar">
-        {activeTab === 'materials' && (
-          <div className="max-w-3xl mx-auto">
-            <LessonMaterialsManager
-              attachments={doc.attachments}
-              setAttachments={(next) => {
-                updateDoc((d) => ({
-                  ...d,
-                  attachments: typeof next === 'function' ? (next as any)(d.attachments) : next,
-                }));
-              }}
-            />
-          </div>
-        )}
         {activeTab === 'settings' && (
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-3xl mx-auto space-y-8">
+            {/* Where this lesson is filed.
+                Read-only on purpose. `materials` is keyed by `course_code` +
+                `topic` as text, and every reader — the student library, the
+                admin hierarchy, the topic lists — resolves a lesson through
+                those two columns. Editing them here would silently move the
+                lesson out of the topic the author opened, and the lesson would
+                appear to vanish from wherever they were looking. Showing the
+                target is honest; moving it belongs in the hierarchy, where the
+                destination topic is chosen. */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-5">Target placement</h3>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-4">
+                {([
+                  ['Course', courseCode],
+                  ['Topic', topic],
+                  ['Programme', portal],
+                  ['Semester', semester || 'Not semester-specific'],
+                ] as const).map(([label, value]) => (
+                  <div key={label} className="min-w-0">
+                    <dt className="text-xs text-slate-500 mb-1">{label}</dt>
+                    <dd className="text-sm font-bold text-white truncate" title={value}>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="text-xs text-slate-500 mt-5">
+                A published lesson appears in the student materials view for this course and the semester
+                above, as soon as the status below is set to Published.
+              </p>
+            </div>
+
             {/* Publishing intent comes from the settings document, so nothing is
                 forced to `publish: true` here. Passing the editor's own `status`
                 state was the bug: the status radio never updated that state, so
@@ -1099,7 +1121,26 @@ export default function LessonEditor({ courseCode, topic, portal, semester, less
                       Section {index + 1} of {doc.slides.length}
                     </div>
                   )}
-                  <div className="space-y-6">{slide.blocks.map((b) => <div key={b.id}>{renderBlock(b, true)}</div>)}</div>
+                  {/* Preview is a card-for-card copy of the reading view: each
+                      block sits in the same dark panel the editor draws around
+                      it while writing, and the same one StudentLessonViewer
+                      uses, so what the author checks here is what a student
+                      gets. Previously the blocks were unboxed here while the
+                      edit surface was boxed, which made preview read as a
+                      different, plainer layout than the thing being previewed. */}
+                  <div className="space-y-6">
+                    {slide.blocks.map((b) => {
+                      const inner = renderBlock(b, true);
+                      if (!inner) return null;
+                      return b.type === 'title' ? (
+                        <div key={b.id}>{inner}</div>
+                      ) : (
+                        <section key={b.id} className="bg-[#0f172a]/50 border border-slate-800/50 rounded-2xl p-5">
+                          {inner}
+                        </section>
+                      );
+                    })}
+                  </div>
                 </section>
               ))}
             </div>
