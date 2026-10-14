@@ -13,6 +13,12 @@ import 'katex/dist/katex.min.css';
 import { supabase } from '../../supabaseClient';
 import CBTExamTaker from '../cbt/CBTExamTaker';
 import CBTResultView from '../cbt/CBTResultView';
+import {
+  allBlocks,
+  parseLessonDocument,
+  slideLabel,
+  type LessonDoc,
+} from '../../lib/lessonDocument';
 
 interface StudentLessonViewerProps {
   material: any;
@@ -27,9 +33,18 @@ interface StudentLessonViewerProps {
 }
 
 export default function StudentLessonViewer({ material, onClose, onNavigateToSibling, onProgressChange }: StudentLessonViewerProps) {
+  const [doc, setDoc] = useState<LessonDoc>(() => parseLessonDocument(null));
+  /**
+   * `blocks` and `attachments` stay as the flattened views the rest of this file
+   * already reads (the AI summary, the "is there a title block" test, the media
+   * list). They are derived from `doc` on load rather than parsed separately, so
+   * the deck and the flat view can never disagree about what the lesson holds.
+   */
   const [blocks, setBlocks] = useState<any[]>([]);
   const [attachments, setAttachments] = useState<any[]>([]);
   const [publishSettings, setPublishSettings] = useState<any>(null);
+  /** Which section is open. Only meaningful when the lesson has more than one. */
+  const [activeSlide, setActiveSlide] = useState(0);
   const [courseName, setCourseName] = useState(material.course_code);
   const [siblings, setSiblings] = useState<any[]>([]);
   
@@ -86,23 +101,18 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
     setIsCompleted(false);
     setIsBookmarked(false);
     setProgressError(false);
-    try {
-      if (material.description) {
-        const parsed = JSON.parse(material.description);
-        if (Array.isArray(parsed)) {
-          setBlocks(parsed);
-        } else if (parsed && parsed.blocks) {
-          setBlocks(parsed.blocks || []);
-          setAttachments(parsed.attachments || []);
-          setPublishSettings(parsed.publishSettings || null);
-        } else {
-          setBlocks([{ id: '1', type: 'main', content: material.description }]);
-        }
-      }
-    } catch (e) {
-      setBlocks([{ id: '1', type: 'main', content: material.description }]);
-    }
-    
+    setActiveSlide(0);
+
+    // One parse, through the shared codec. This used to be its own
+    // Array-vs-`.blocks` ladder, which is how the viewer and the editor drifted
+    // apart: a shape the editor wrote but this copy did not recognise rendered
+    // as a blank lesson even though the content was in the database.
+    const parsed = parseLessonDocument(material.description);
+    setDoc(parsed);
+    setBlocks(allBlocks(parsed));
+    setAttachments(parsed.attachments || []);
+    setPublishSettings(parsed.publishSettings || null);
+
     fetchContext();
     loadProgress();
     loadBookmark();
@@ -433,6 +443,19 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
   // Simulating the user doesn't have premium for demo purposes:
   const userHasPremium = false;
 
+  /**
+   * What to render in the body.
+   *
+   * A single-section lesson renders the whole flat block list, which is exactly
+   * what a v1 lesson used to be — so every lesson written before slides existed
+   * is untouched. A multi-section lesson renders only the open section, with the
+   * navigation strip above it. `activeSlide` is clamped rather than trusted,
+   * because a lesson can be swapped underneath this component while it stays
+   * mounted.
+   */
+  const activeSlideIndex = Math.min(activeSlide, Math.max(doc.slides.length - 1, 0));
+  const visibleBlocks = doc.slides.length > 1 ? (doc.slides[activeSlideIndex]?.blocks ?? []) : blocks;
+
   if (isPremiumRequired && !userHasPremium) {
     return (
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#020617] flex flex-col items-center justify-center p-4">
@@ -591,13 +614,70 @@ export default function StudentLessonViewer({ material, onClose, onNavigateToSib
               body sizes for Markdown, and applying it here would override the
               explicit `text-4xl`/`text-5xl` on the title block. Each Markdown
               block applies it to its own content instead. */}
+          {/* Section navigation, shown only for a multi-section lesson. A
+              one-section lesson renders exactly as it always has — a reader
+              should not be given a "1 of 1" control to look at. */}
+          {doc.slides.length > 1 && (
+            <div className="mb-10 flex flex-wrap items-center gap-2 bg-[#0d1a33] border border-sky-500/15 rounded-2xl p-2">
+              {doc.slides.map((slide, index) => (
+                <button
+                  key={slide.id}
+                  onClick={() => {
+                    setActiveSlide(index);
+                    containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-colors ${
+                    index === activeSlideIndex
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  <span className={`w-5 h-5 rounded-md flex items-center justify-center text-[11px] ${
+                    index === activeSlideIndex ? 'bg-slate-950/20' : 'bg-slate-800'
+                  }`}>
+                    {index + 1}
+                  </span>
+                  <span className="truncate max-w-[9rem]">{slideLabel(slide, index)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           <div>
-            {blocks.map((block, i) => (
+            {visibleBlocks.map((block, i) => (
               <React.Fragment key={block.id || i}>
                 {renderBlock(block)}
               </React.Fragment>
             ))}
           </div>
+
+          {doc.slides.length > 1 && (
+            <div className="mt-12 flex items-center justify-between gap-4 pt-8 border-t border-slate-800">
+              <button
+                onClick={() => {
+                  setActiveSlide((i) => Math.max(0, i - 1));
+                  containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                disabled={activeSlideIndex === 0}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <ChevronLeft size={16} /> Previous section
+              </button>
+              <span className="text-xs font-bold uppercase tracking-widest text-slate-500">
+                {activeSlideIndex + 1} / {doc.slides.length}
+              </span>
+              <button
+                onClick={() => {
+                  setActiveSlide((i) => Math.min(doc.slides.length - 1, i + 1));
+                  containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                disabled={activeSlideIndex >= doc.slides.length - 1}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-sm font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Next section <ChevronRight size={16} />
+              </button>
+            </div>
+          )}
 
 
           {/* Lesson Materials / Attachments */}

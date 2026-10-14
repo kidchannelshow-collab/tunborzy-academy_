@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { X, Upload, FileText, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useProfile } from '../../lib/useProfile';
+import { nextMaterialOrderIndex } from '../../lib/materialOrder';
 
 /**
  * Material upload / metadata editor for the Course Management hierarchy.
@@ -194,7 +195,12 @@ export default function MaterialUploadModal({
       };
 
       if (!isEdit) {
-        payload.order_index = Date.now();
+        // `materials.order_index` is a 32-bit `integer`. This used to be
+        // `Date.now()` — about 1.79e12 — which is ~834× past the type's
+        // 2,147,483,647 ceiling, so every new material was rejected with
+        // `value "1791931546168" is out of range for type integer` and nothing
+        // was ever written. The next free index is read from the table instead.
+        payload.order_index = await nextMaterialOrderIndex(courseCode, topic);
         payload.lecturer_id = profile?.id || null;
         payload.lecturer_name = profile?.full_name || 'Admin';
       }

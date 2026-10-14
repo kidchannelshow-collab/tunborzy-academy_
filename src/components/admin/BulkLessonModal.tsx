@@ -2,44 +2,79 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { X, ListPlus } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
+import { nextMaterialOrderIndex } from '../../lib/materialOrder';
+import { createBlock, createSlide, serializeLessonDocument, type LessonDoc } from '../../lib/lessonDocument';
 
 interface BulkLessonModalProps {
   courseCode: string;
   topic: string;
+  /**
+   * `materials.portal` is NOT NULL and there is no default, so an insert without
+   * it is rejected. Callers must supply the programme the lessons belong to, or
+   * every bulk create fails.
+   */
+  portal: string;
+  semester?: string | null;
   onClose: () => void;
   onSuccess: () => void;
 }
 
-export default function BulkLessonModal({ courseCode, topic, onClose, onSuccess }: BulkLessonModalProps) {
+export default function BulkLessonModal({ courseCode, topic, portal, semester, onClose, onSuccess }: BulkLessonModalProps) {
   const [titles, setTitles] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState('');
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!titles.trim() || !supabase) return;
     setIsSaving(true);
-    
+    setError('');
+
     try {
-      const lessonTitles = titles.split('\\n').map(t => t.trim()).filter(t => t.length > 0);
-      const newLessons = lessonTitles.map((title, index) => ({
-        title,
-        course_code: courseCode,
-        topic,
-        file_type: 'lesson',
-        is_published: false, // Start as Draft
-        description: JSON.stringify({ blocks: [], publishSettings: { status: 'Draft', auditLogs: [] } }),
-        order_index: index + 100 // push to end
-      }));
-      
-      if (newLessons.length > 0) {
-        await supabase.from('materials').insert(newLessons);
-        onSuccess();
-      } else {
-        onClose();
+      /**
+       * One title per line.
+       *
+       * The separator used to be the two-character literal `'\\n'` — a backslash
+       * followed by an "n" — which never matches a real line break, so the whole
+       * textarea collapsed into a single lesson with newlines in its title.
+       * `/\r?\n/` matches what the textarea actually produces, on Windows too.
+       */
+      const lessonTitles = titles.split(/\r?\n/).map(t => t.trim()).filter(t => t.length > 0);
+
+      // Written one at a time rather than as a single bulk insert: each lesson
+      // needs the next order index in this topic, which is only known after the
+      // previous row exists.
+      for (const title of lessonTitles) {
+        // A v2 document with a real title block. The old payload was
+        // `{ blocks: [] }`, which parsed to a lesson with no title block at all —
+        // so the editor opened it blank and the next save renamed the row to
+        // "Untitled Lesson", discarding the title the author had just typed.
+        const doc: LessonDoc = {
+          version: 2,
+          slides: [{ ...createSlide(), blocks: [createBlock('title', title), createBlock('main', '')] }],
+          attachments: [],
+          publishSettings: { status: 'Draft', publishAt: null, unpublishAt: null, isLocked: false, visibility: 'Public', isPremium: false, auditLogs: [] },
+        };
+
+        const { error: insertError } = await supabase.from('materials').insert([{
+          title,
+          course_code: courseCode,
+          topic,
+          portal,
+          semester: semester || null,
+          file_type: 'lesson',
+          file_url: '#',
+          is_published: false, // Start as Draft
+          description: serializeLessonDocument(doc),
+          order_index: await nextMaterialOrderIndex(courseCode, topic),
+        }]);
+        if (insertError) throw insertError;
       }
-    } catch (err) {
+
+      onSuccess();
+    } catch (err: any) {
       console.error(err);
-      alert('Failed to bulk create lessons');
+      setError(err?.message || 'Failed to bulk create lessons.');
     }
     setIsSaving(false);
   };
@@ -69,6 +104,9 @@ export default function BulkLessonModal({ courseCode, topic, onClose, onSuccess 
               required 
             />
           </div>
+          {error && (
+            <p className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/20 rounded-lg px-3 py-2">{error}</p>
+          )}
           <div className="pt-4 flex gap-3">
             <button type="button" onClick={onClose} disabled={isSaving} className="flex-1 py-3 px-4 rounded-xl border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors">Cancel</button>
             <button type="submit" disabled={isSaving} className="flex-1 py-3 px-4 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-bold transition-colors flex items-center justify-center gap-2">

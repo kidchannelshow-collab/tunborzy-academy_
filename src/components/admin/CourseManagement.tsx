@@ -1781,6 +1781,11 @@ export default function CourseManagement({ onNavigate }: { onNavigate?: (view: s
         <BulkLessonModal
           courseCode={path.course.course_code}
           topic={path.topic.title}
+          /* `materials.portal` is NOT NULL, so a bulk insert that omits it fails
+             outright. These were never passed, which is why "Bulk Create" could
+             not have written anything. */
+          portal={path.programme!}
+          semester={path.semester || (path.course as any).semester || ''}
           onClose={() => setShowBulkLessonModal(false)}
           onSuccess={() => { setShowBulkLessonModal(false); fetchData(); }}
         />
@@ -1802,8 +1807,11 @@ export default function CourseManagement({ onNavigate }: { onNavigate?: (view: s
             portal={path.programme!}
             semester={path.semester || ''}
             lesson={editingLesson}
-            onClose={() => setShowLessonEditor(false)}
-            onSaved={() => { setShowLessonEditor(false); fetchData(); }}
+            /* The editor stays open across a save: it owns the document it just
+               wrote and reports the result with its own toast, which would be
+               unmounted before it could be read if the save closed the editor. */
+            onClose={() => { setShowLessonEditor(false); setEditingLesson(null); fetchData(); }}
+            onSaved={() => { void fetchData(); }}
           />
         )}
       </AnimatePresence>

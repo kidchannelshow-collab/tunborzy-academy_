@@ -1628,15 +1628,15 @@ export default function UndergraduateManager() {
           portal={PORTAL}
           semester={selectedSemester}
           lesson={editingLesson}
+          /* The editor stays open across a save: it owns the document it just
+             wrote and reports the result with its own toast, which would be
+             unmounted before it could be read if the save closed the editor. */
           onClose={() => {
-            setShowLessonEditor(false);
-            setEditingLesson(null);
-          }}
-          onSaved={() => {
             setShowLessonEditor(false);
             setEditingLesson(null);
             fetchCourseContent();
           }}
+          onSaved={() => { void fetchCourseContent(); }}
         />
       )}
     </div>
